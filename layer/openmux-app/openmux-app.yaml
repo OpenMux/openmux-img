@@ -1,0 +1,37 @@
+# METABEGIN
+# X-Env-Layer-Name: openmux-app
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: Install the OpenMux package list: standard distro
+# X-Env-Layer-Desc: packages at the essential phase (mmdebstrap packages),
+# X-Env-Layer-Desc: and custom-repo packages via a customize-hook that runs
+# X-Env-Layer-Desc: AFTER openmux-repo's apt-get update.
+# X-Env-Layer-Version: 1.0.2
+# X-Env-Layer-Requires: openmux-repo
+# X-Env-Layer-Provides: openmux-app
+# METAEND
+---
+mmdebstrap:
+  # Standard distro packages needed by the OpenMux tooling (curl/git). These
+  # are always available from the base repositories, so they install fine at
+  # the essential phase.
+  packages:
+    - curl
+    - git
+  # CUSTOM-REPO packages: a layer's mmdebstrap packages install at the
+  # ESSENTIAL phase, i.e. BEFORE the openmux-repo customize-hook runs its
+  # apt-get update - so repo-served packages CANNOT go in the list above.
+  # This customize-hook runs after openmux-repo (layer order is preserved in
+  # the plan), where the repo is already known to apt. Leave the list empty
+  # when there is no custom repo.
+  customize-hooks:
+    # --- OpenMux custom-repo packages: edit this list ---------------------
+    # NOTE: hooks run under mmdebstrap with plain sh (dash) - keep this
+    # dash-compatible (no arrays, no [[ ]]).
+    - |
+      set -eu
+      # Space-separated list, e.g. pkgs="openmux-agent openmux-agent-dev".
+      # Left empty -> the hook is a no-op.
+      pkgs=""
+      [ -z "$pkgs" ] && exit 0
+      # shellcheck disable=SC2086  (word splitting is the point)
+      DEBIAN_FRONTEND=noninteractive chroot "$1" apt-get install -y $pkgs

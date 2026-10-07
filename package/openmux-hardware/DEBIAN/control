@@ -1,0 +1,12 @@
+Package: openmux-hardware
+Version: 1.0.0
+Architecture: all
+Maintainer: OpenMux <support@openmux.io>
+Homepage: https://github.com/OpenMux
+Section: misc
+Priority: optional
+Description: OpenMux hardware identity (internal FTDI console)
+ Runtime service that records the identity (manufacturer/product/serial)
+ of the console's internal FTDI chip (serial EEPROM matching OMH*-A) to
+ /etc/openmux-hardware, plus udev symlinks /dev/openmux/<port> for the
+ exposed console ports.

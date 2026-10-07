@@ -1,0 +1,47 @@
+# openmux-cm5.yaml - OpenMux target image for the Raspberry Pi Compute
+# Module 5 (BCM2712).
+#
+# Build with:  ./build.sh --buildspec <customer-build-spec.yaml>
+#
+# The built-in "user1" account is fully driven by the customer build spec at
+# build time (./build.sh emits IGconf_device_user1* / IGconf_ssh_* overrides
+# from it): name, password or hash, sudo mode, uid/gid, groups and the
+# multi-line authorized_keys. Nothing is hardcoded here; the account name
+# "openmux" is reserved for a future OpenMux system account.
+#
+# The `layer:` map selects ONE layer per key (keys are free labels, no list
+# support). This image's own keys are repo/packages/app; base + serial are
+# inherited from openmux-base.yaml. The build resolves the union and completes
+# the dependency graph; hook execution order follows the resolved build plan
+# (deps + provides), not the key order here. Target order: openmux-repo sets
+# the APT repo, openmux-packages installs the local .debs, openmux-app adds
+# the distro + custom-repo packages. The materialized buildspec hooks (user
+# account + post_install) run AFTER every layer hook.
+
+include:
+  file: openmux-base.yaml
+
+# Section order matters: device: before image: (see openmux-base.yaml).
+device:
+  # Device layer NAME is "rpi-cm5" (generator: device/cm5/device.yaml), not
+  # "cm5" (that is the directory, not the layer). `class` is the layer's
+  # validation key (valid: cm5).
+  layer: rpi-cm5
+  class: cm5
+  vendor: openmux
+  hostname: openmux
+
+image:
+  # Built-in genimage layout for Raspberry Pi: VFAT boot + ext4 root.
+  layer: image-rpios
+  # 200% lets genimage size the boot (FAT) partition up (firmware is ~90 MiB).
+  boot_part_size: 200%
+  # 300% caps the root partition at 3 GiB - plenty for minbase + openmux
+  # packages. Raise this if the image set grows.
+  root_part_size: 300%
+  name: openmux-cm5
+
+layer:
+  repo: openmux-repo
+  packages: openmux-packages
+  app: openmux-app

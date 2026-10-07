@@ -1,0 +1,34 @@
+# METABEGIN
+# X-Env-Layer-Name: openmux-repo
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: Configure the OpenMux custom APT repository (DEB822 or
+# X-Env-Layer-Desc: one-line format), install its GPG key when shipped, then
+# X-Env-Layer-Desc: refresh package lists and full-upgrade inside the chroot.
+# X-Env-Layer-Version: 1.0.1
+# X-Env-Layer-Requires:
+# X-Env-Layer-Provides: openmux-repo
+# X-Env-VarPrefix: om
+#
+# X-Env-Var-repo_uri:
+# X-Env-Var-repo_uri-Desc: APT base URI substituted into the repo definition.
+# X-Env-Var-repo_uri-Desc: When empty, the hook falls back to its placeholder.
+# X-Env-Var-repo_uri-Required: n
+# X-Env-Var-repo_uri-Valid: regex:^https?://
+# X-Env-Var-repo_uri-Set: n
+# METAEND
+---
+# Inline mmdebstrap hooks MUST be nested under the `mmdebstrap:` key (same
+# as every engine layer) - a top-level customize-hooks: in the layer body is
+# silently ignored by the parser, the hook then never runs, and nothing
+# reports it (a top-level customize-hooks: looked harmless because it is a
+# no-op without a repo URI - the bug only bites once a real repo is
+# configured).
+mmdebstrap:
+  customize-hooks:
+    # Runs in the customize phase: $1 = chroot dir; cwd = the source root
+    # given with -S. The repo definition + GPG key live next to this file in
+    # sources/ ($LAYER_DIR = this layer's directory, exported by the runner).
+    # The hook reads the URI from $OPENMUX_REPO_URI.
+    - |
+        export OPENMUX_REPO_URI="${IGconf_om_repo_uri:-}"
+        sh "$LAYER_DIR/sources/50-openmux-repo.sh" "$1"

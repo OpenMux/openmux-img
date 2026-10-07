@@ -1,0 +1,22 @@
+# OpenMux custom APT repository.
+#
+# ${OPENMUX_REPO_URI} is substituted at build time (default: see
+# 50-openmux-repo.sh). Replace the whole file to define several repositories,
+# suites or components - everything that apt in the chroot can consume works,
+# e.g.:
+#
+#   Types: deb
+#   URIs: ${OPENMUX_REPO_URI}
+#   Suites: stable
+#   Components: contrib non-free
+#
+# For an unsigned test repo, add the line:
+#   Trusted: yes
+#
+# and omit openmux.gpg.
+
+Types: deb
+URIs: ${OPENMUX_REPO_URI}
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/openmux.gpg

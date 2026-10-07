@@ -1,0 +1,77 @@
+# METABEGIN
+# X-Env-Layer-Name: openmux-serial-console
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: Serial console on /dev/ttyAMA0 (BCM2712 PL011 / uart0,
+# X-Env-Layer-Desc: the port behind console=serial0) for the CM5. This port is
+# X-Env-Layer-Desc: the device's only debug channel (no debug UART on the CM5
+# X-Env-Layer-Desc: pin header), so it carries maximum information: firmware
+# X-Env-Layer-Desc: boot log, the full kernel console and the login prompt.
+# X-Env-Layer-Desc: Decomposition: (1) firmware console routing -> the lines
+# X-Env-Layer-Desc: in openmux-config.txt appended to config.txt (uart0 is
+# X-Env-Layer-Desc: the 40-pin PL011; BCM2712 would otherwise default the
+# X-Env-Layer-Desc: console to a debug uart such as ttyAMA10, unavailable on
+# X-Env-Layer-Desc: CM5);
+# X-Env-Layer-Desc: (2) full kernel console -> a cmdline.d fragment makes
+# X-Env-Layer-Desc: console=serial0,115200 the FIRST console token; the VGA
+# X-Env-Layer-Desc: console (console=tty1) is kept (kept, not removed, so
+# X-Env-Layer-Desc: any on-screen output still works on a test bench);
+# X-Env-Layer-Desc: (3) login prompt -> systemd's getty-generator provides
+# X-Env-Layer-Desc: serial-getty@ttyAMA0 automatically because the tty is a
+# X-Env-Layer-Desc: kernel console - no unit creation or enabling here.
+# X-Env-Layer-Desc: earlycon is deliberately NOT used: the full UART driver
+# X-Env-Layer-Desc: covers all practical debug and enable_uart=1 covers the
+# X-Env-Layer-Desc: pre-driver (firmware) window.
+# X-Env-Layer-Version: 2.3.0
+# X-Env-Layer-Requires: rpi-boot-firmware
+# X-Env-Layer-Provides: openmux-serial
+#
+# METAEND
+---
+# The kernel cmdline is assembled at the PREIMAGE stage from every plan
+# layer's for/linux-base/cmdline.d fragments (plan order, then file name),
+# NOT from any file in the chroot - a customize-hook editing
+# $1/boot/firmware/cmdline.txt can never work: at customize time that file
+# is still the stock template, and the assembly runs later and overwrites
+# it. This layer ships exactly one fragment (engine convention - same
+# layout as the engine's own family-base layer, whose 00-defaults
+# fragment lives in family-base.d/for/linux-base/cmdline.d/; the scan is
+# <layer-name>.d/for/linux-base/cmdline.d/, NOT the layer root):
+#   openmux-serial-console.d/for/linux-base/cmdline.d/10-openmux-serial:
+#     -console=* +console=serial0,115200 +console=tty1
+# (a fragment must be exactly ONE line).
+# `-console=*` strips whatever the device defaults put in, then the serial
+# console is ADDed FIRST and the VGA console (tty1) is kept second, so the
+# result is deterministic and self-contained: serial0 is the first console
+# token no matter what the device layer provides. The assembler dedupes
+# exact tokens, so the device's own fragments (applied later in the plan)
+# cannot duplicate or re-order anything.
+#
+# config.txt has no fragment mechanism in this engine: rpi-boot-firmware
+# installs its template into the chroot during the customize phase and
+# genimage mcopy's it into the boot vfat afterwards. The inline
+# customize-hook below appends the UART routing lines from
+# openmux-config.txt after the template exists. It used to be clobbered
+# because this layer ordered BEFORE rpi-boot-firmware; `Requires:
+# rpi-boot-firmware` (meta above) now orders it AFTER that layer in the plan,
+# so the append runs after the template install and survives to the vfat.
+#
+# There is deliberately NO getty unit: the console= entry makes systemd's
+# getty-generator bring up serial-getty@ttyAMA0 (a hand-enabled getty would
+# double-instance agetty on the same tty). If serial login is missing on
+# real hardware that is a bug to investigate, not to paper over.
+# Inline mmdebstrap hooks MUST be nested under the `mmdebstrap:` key (see
+# every engine layer, e.g. rpi-boot-firmware) - a top-level customize-hooks:
+# in the layer body is silently ignored by the parser (the hook then never
+# runs and nothing reports it).
+mmdebstrap:
+  customize-hooks:
+    # Append the CM5 UART routing block (dtparam=uart0 / uart0_console so
+    # the console lands on the 40-pin PL011 /dev/ttyAMA0, not a debug uart
+    # such as ttyAMA10, plus enable_uart for the firmware's pre-driver
+    # window). The chroot's /boot/firmware/config.txt is the template
+    # rpi-boot-firmware installed, so it now already exists and is appended
+    # to; the append (now ordered after that install, see the Requires meta
+    # above) is carried into the boot vfat by genimage. cmdline.txt is NOT
+    # touched here - the console tokens are guaranteed by the static
+    # for/linux-base/cmdline.d fragment in openmux-serial-console.d/.
+    - cat "$LAYER_DIR/openmux-config.txt" >> "$1/boot/firmware/config.txt"

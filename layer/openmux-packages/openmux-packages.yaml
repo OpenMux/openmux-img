@@ -1,0 +1,44 @@
+# openmux-packages - install the OpenMux local .deb packages into the chroot.
+#
+# The build (pinned rpi-image-gen commit) does not read a config-level
+# `packages:` section, so local .deb files are installed the documented
+# way: a layer whose customize-hook copies the built .debs into the chroot
+# and `apt-get install`s them. (See examples/debstore in the generator.)
+#
+# This layer installs the packages the TARGET image needs:
+#   - openmux-hardware      (udev rules, /dev/serial0 bridge, hw-detect service)
+#   - openmux-factory-tools (eeprom/serial factory utilities)
+# The install medium installs the same debs PLUS openmux-install-menu and
+# overlayroot in its own layer (openmux-install-medium), where all of them
+# can be installed in one apt call.
+#
+# No `Requires: openmux-repo` deliberately: the install medium does not use
+# the custom repo at all, and pulling openmux-repo in by dependency would
+# run its `apt-get update` against an unconfigured URI there. In the target
+# config the layer list orders openmux-repo before openmux-packages (and
+# before openmux-app), so the repo is configured before anything is installed.
+
+# METABEGIN
+# X-Env-Layer-Name: openmux-packages
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: Install the OpenMux local .deb packages (hardware, factory
+# X-Env-Layer-Desc: tools) into the chroot via apt.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Provides: openmux-packages
+# METAEND
+---
+mmdebstrap:
+  customize-hooks:
+    # Runs on the build host (chroot path is $1, cwd = the source root),
+    # before genimage writes the image. Copies the built .debs into the
+    # chroot and installs them; their apt dependencies are resolved from
+    # the repositories configured by the base and openmux-repo layers.
+    - |
+      set -eu
+      mkdir -p "$1/tmp/openmux-pkgs"
+      cp -a "dist/pkgs/openmux-hardware_"*.deb "$1/tmp/openmux-pkgs/"
+      cp -a "dist/pkgs/openmux-factory-tools_"*.deb "$1/tmp/openmux-pkgs/"
+      # NOTE: the glob MUST stay quoted so it expands INSIDE the chroot
+      # (apt needs the in-chroot /tmp/... paths).
+      chroot "$1" sh -c 'apt-get install -y --no-install-recommends /tmp/openmux-pkgs/*.deb'
+      rm -rf "$1/tmp/openmux-pkgs"

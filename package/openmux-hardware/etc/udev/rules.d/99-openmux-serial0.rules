@@ -1,0 +1,3 @@
+# Stable /dev/serial0 -> active serial console (PL011 / ttyAMA0 on the CM5).
+# The OpenMux install menu resolves the serial console through this symlink.
+SUBSYSTEM=="tty", KERNEL=="ttyAMA0", SYMLINK+="serial0"

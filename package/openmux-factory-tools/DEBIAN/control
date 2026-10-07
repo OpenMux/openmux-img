@@ -1,0 +1,14 @@
+Package: openmux-factory-tools
+Version: 1.0.0
+Architecture: all
+Maintainer: OpenMux <support@openmux.io>
+Homepage: https://github.com/OpenMux
+Section: misc
+Priority: optional
+Depends: usbutils, python3-serial
+Description: OpenMux factory provisioning and test tools
+ Standalone factory utilities for the OpenMux console: programming the
+ internal/external FTDI EEPROM (manufacturer, product, serial base),
+ listing detected FTDI consoles, a serial loopback test and the board
+ test runner. Installed on the install medium (used from the factory
+ menu) and on the target (kept for field service).

@@ -1,0 +1,37 @@
+# openmux-base.yaml
+# Shared base for all openmux device variants.
+#
+# Device-specific images include this file and set their own device:,
+# layer: list and image.name, e.g. config/openmux-cm5.yaml and
+# config/openmux-install-medium.yaml.
+#
+# NOTE on the `layer:` section: the build collects the LAYER VALUES of this
+# section - ONE layer per key (each key becomes IGconf_layer_<key>=<one
+# layer name>). Keys are free labels; there is NO list support (a YAML list
+# is read back as a single literal string, not a set of layers). The final
+# layer set is the union of every key across the base and the concrete image
+# (dependencies completed automatically). include-merge is per key (a child's
+# `layer.<key>` overrides the base's `layer.<key>`), so a layer shared by all
+# images lives under a key no child reuses, and an image-specific layer
+# under its own key.
+#
+# NOTE on section ORDER: the children deliberately list `device:` before
+# `image:` (the stock config order). The merged key order becomes the layer
+# pipeline order, and the kernel-cmdline fragments are applied in that
+# order - the image layer's `-root=*` cleanup must run AFTER the device
+# layer adds its `root=ROOTDEV` token, or the literal ROOTDEV survives into
+# cmdline.txt and the image cannot boot.
+
+# Debian trixie (Debian 13) multiarch-minimum base for Raspberry Pi arm64:
+# systemd-min + systemd-timesyncd + openssh-server + the rpi
+# device/firmware/skel layers, ...  (see layer/suite/debian/trixie-minbase.yaml
+# in the generator - the same base the stock config/trixie-minbase.yaml uses).
+layer:
+  base: trixie-minbase
+  # Both the target image and the install medium need the CM5 40-pin UART
+  # console (their only debug/login channel), so it is shared here under its
+  # own key (no concrete image reuses `serial`).
+  serial: openmux-serial-console
+
+# The image: layout (image-rpios + partition sizes) is declared in each
+# concrete image's config AFTER its device: section - see the NOTE above.

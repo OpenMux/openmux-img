@@ -1,0 +1,13 @@
+[Unit]
+Description=Detect OpenMux hardware identity from internal FTDI EEPROM
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/openmux-hardware/openmux-detect-hardware.sh
+
+[Install]
+WantedBy=sysinit.target

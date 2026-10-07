@@ -1,0 +1,20 @@
+#!/bin/sh
+# Enable the hardware-detection service offline (dpkg postinst context).
+set -e
+
+UNIT=openmux-detect-hardware.service
+WANTS=/etc/systemd/system/sysinit.target.wants
+
+if command -v deb-systemd-helper >/dev/null 2>&1; then
+    # deb-systemd-helper reads the unit's [Install] section (WantedBy=sysinit.target)
+    # and creates the /etc/systemd/system/sysinit.target.wants/ link itself.
+    if deb-systemd-helper enable "$UNIT"; then
+        exit 0
+    fi
+    # Fall through to the manual link if the helper is unavailable/broken.
+fi
+
+mkdir -p "$WANTS"
+ln -sf "../systemd/system/$UNIT" "$WANTS/$UNIT"
+
+exit 0

@@ -1,0 +1,90 @@
+# METABEGIN
+# X-Env-Layer-Name: openmux-install-medium
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: Install-medium-only factory tuning: everything the debs
+# X-Env-Layer-Desc: deliberately do NOT ship - root autologin menu on tty1 /
+# X-Env-Layer-Desc: serial, blank root password, first-boot-wizard and
+# X-Env-Layer-Desc: auto-resize masks, and embedding the customer target
+# X-Env-Layer-Desc: image in /opt/openmux-installer/images. Applies to the
+# X-Env-Layer-Desc: USB install medium build only.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires:
+# X-Env-VarPrefix: om
+#
+# X-Env-Var-target_image:
+# X-Env-Var-target_image-Desc: Pre-built customer target image (.img.xz) to
+# X-Env-Layer-Desc: embed as the installable image. Set by the build wrapper
+# X-Env-Layer-Desc: (entry.sh), never by hand.
+# X-Env-Var-target_image-Required: y
+# X-Env-Var-target_image-Valid: file
+# X-Env-Var-target_image-Set: y
+# METAEND
+---
+mmdebstrap:
+  # The overlay dir (openmux-install-medium.d/overlay) is rsynced into the
+  # chroot BEFORE the customize-hooks below run (see rpi-image-gen's
+  # synth_layer_pre), so the hooks may rely on its content:
+  customize-hooks:
+    # --- factory login: root with a BLANK password ----------------------------
+    # (intentional factory-only choice: the medium is an internal boot
+    # appliance; the password is unset, not empty-but-strong)
+    - chroot $1 passwd -d root
+    # Blank root login only works if PAM permits empty passwords on tty:
+    - sed -i -E '/pam_unix\.so/ { /nullok/! s/\$/ nullok/ }' $1/etc/pam.d/common-auth
+
+    # --- autologin the root shell (menu) on tty1 + serial --------------------
+    # .bash_profile (overlay) execs the menu; the drop-ins below make agetty
+    # autologin root into it.
+    # getty@tty1: instance-specific - not run by the getty-generator, enabled
+    # explicitly (like the original create_install_medium.sh):
+    - |
+      mkdir -p $1/etc/systemd/system/getty.target.wants
+      ln -sf /lib/systemd/system/getty@.service $1/etc/systemd/system/getty.target.wants/getty@tty1.service
+    # serial-getty@ttyAMA0: the RUNNING serial unit is the serial-getty@ template
+    # instance the getty-generator creates (console=serial0); the per-template
+    # drop-in from the overlay (etc/systemd/system/serial-getty@.service.d)
+    # applies to it. No enable needed - the generator owns the instance.
+
+    # --- defensive masks: never fight our autologin / factory role -------------
+    # Minbase ships none of these, but the openmux custom repo (if configured
+    # for the medium later) could introduce RPi-OS-style first-boot units.
+    # Mask only units that actually exist; masking absent units would leave
+    # dangling symlinks.
+    - |
+      for unit in userconfig.service user-config.service \
+                  cloud-init.service cloud-init-local.service \
+                  cloud-config.service cloud-final.service cloud-init.target \
+                  rpi-resize.service resize2fs_once.service; do
+        unit_file="$1/lib/systemd/system/$unit"
+        [ -e "$unit_file" ] || unit_file="$1/usr/lib/systemd/system/$unit"
+        if [ -e "$unit_file" ]; then
+          ln -sf /dev/null "$1/etc/systemd/system/$unit"
+          echo "masked $unit"
+        fi
+      done
+
+    # --- embed the customer target image --------------------------------------
+    # The menu (openmux-install-menu deb) lists /opt/openmux-installer/images;
+    # drop the pre-built target in there so it can be flashed to eMMC.
+    - |
+      install -d -m 0755 $1/opt/openmux-installer/images
+      install -m 0644 ${IGconf_om_target_image} \
+        $1/opt/openmux-installer/images/$(basename ${IGconf_om_target_image})
+
+    # --- the install-menu package (medium only) --------------------------------
+    # openmux-packages (shared) installs hardware + factory-tools; this layer
+    # adds the 9-option factory menu, which execs from the autologin shell.
+    # Also pulls overlayroot from the distro repos: menu option 9 switches
+    # the rootfs to a read-only overlayroot=tmpfs at reboot, whose initramfs
+    # machinery comes from the overlayroot package.
+    - |
+      set -eu
+      mkdir -p "$1/tmp/openmux-pkgs"
+      cp -a "dist/pkgs/openmux-install-menu_"*.deb "$1/tmp/openmux-pkgs/"
+      cp -a "dist/pkgs/openmux-hardware_"*.deb "$1/tmp/openmux-pkgs/"
+      cp -a "dist/pkgs/openmux-factory-tools_"*.deb "$1/tmp/openmux-pkgs/"
+      # The glob stays quoted so it expands INSIDE the chroot.
+      chroot "$1" sh -c \
+        'apt-get update -y && apt-get install -y --no-install-recommends \
+          /tmp/openmux-pkgs/*.deb overlayroot'
+      rm -rf "$1/tmp/openmux-pkgs"

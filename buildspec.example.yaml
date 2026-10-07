@@ -1,0 +1,82 @@
+# buildspec.example.yaml - TEMPLATE for the OpenMux customer build spec.
+#
+# Usage:  cp buildspec.example.yaml <my-customer>.yaml   (then edit)
+#         ./build.sh --buildspec <my-customer>.yaml
+#
+# The build spec is git-ignored (anything matching *buildspec*.yaml except
+# this example): it contains customer credentials. Keep it out of the repo.
+#
+# Path conventions: `key_file` and `post_install` are relative to THIS FILE'S
+# directory (the customer's keys/scripts live next to the spec).
+#
+# Validation runs before anything is built (build/parse-buildspec.py);
+# errors point at the exact spec entry.
+
+# --------------------------------------------------------------------------
+# admin-user: the primary account. Maps 1:1 onto rpi-image-gen's built-in
+# "user1" mechanism (nothing else is configurable for it).
+# --------------------------------------------------------------------------
+admin-user:
+  # Account name (required; must not be 'openmux' or 'root').
+  name: admin
+
+  # Exactly ONE of `password` / `password_hash` / neither:
+  #   password:      plaintext, checked against the generator's policy:
+  #                  >=8 chars incl. lower, upper, digit and one of @$!%*?&
+  #   password_hash: pre-hashed (e.g. `./build.sh --genpasswd '<pass>'`)
+  #   neither:       the account is LOCKED (no password login).
+  password: "ChangeMe1!"
+  # password_hash: "$6$..."
+
+  # sudo mode: none (default) | passwd (sudo asks for the password)
+  #            | nopasswd (sudo without a password)
+  sudo: passwd
+
+  # Identity (all optional). Defaults: uid/gid 1000, no extra groups.
+  uid: 1000
+  gid: 1000
+  # Extra groups to join (created if absent), comma space list as YAML list:
+  groups:
+    - adm
+
+  # SSH access: EITHER one inline key (placeholder - REPLACE with a real
+  # public key):
+  keys:
+    - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyReplaceMe0000000000 admin@example"
+  # ...OR a file with several keys (one per line) - multiple keys need this:
+  # (path relative to this file's directory; the file must exist)
+  # key_file: keys/admin.pub
+
+# --------------------------------------------------------------------------
+# users: OPTIONAL list of additional accounts (NOT user1): each gets a
+# normal home directory + their own sudoers/keys. `uid`/`gid` are not
+# allowed here (the built-in user1 keeps 1000; additional accounts get
+# auto-assigned uids).
+# --------------------------------------------------------------------------
+# users:
+#   - name: jdoe
+#     password: "ChangeMe2!"        # same policy as admin user's
+#     sudo: nopasswd                # none | passwd | nopasswd
+#     groups: [adm]
+#     keys:                          # one or more inline keys
+#       - "ssh-ed25519 AAAA... jdoe@host"
+#   - name: kate
+#     password_hash: "$6$..."       # or use ./build.sh --genpasswd
+#     sudo: none
+#     key_file: keys/kate.pub        # or a file (several keys possible)
+
+# --------------------------------------------------------------------------
+# post_install: OPTIONAL extra hook script. Runs at image build time, AFTER
+# all packages/accounts are in place, with $1 = the chroot directory, e.g.:
+#
+#   #!/bin/sh
+#   set -eu
+#   chroot "$1" systemctl enable some-service
+#   # NOTE: the script runs on the BUILD HOST — a shell redirect (… > file)
+#   # would execute OUTSIDE the chroot. To write into the image, pipe in or
+#   # redirect inside:
+#   echo built-ok | chroot "$1" sh -c 'cat > /etc/openmux-marker'
+#
+# The script must be executable.
+# --------------------------------------------------------------------------
+# post_install: extras/post-install.sh

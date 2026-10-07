@@ -1,0 +1,2 @@
+/etc/udev/rules.d/99-openmux-ftdi.rules
+/etc/udev/rules.d/99-openmux-serial0.rules

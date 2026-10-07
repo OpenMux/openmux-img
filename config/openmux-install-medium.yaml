@@ -1,0 +1,43 @@
+# openmux-install-medium.yaml - the USB install medium (factory boot menu).
+#
+# Build with:  ./build.sh  (no business build spec needed - the medium is a
+#                          fixed factory appliance: root + blank password +
+#                          the 9-option menu + the prebuilt target image
+#                          embedded in it)
+#
+# The `layer:` map selects ONE layer per key (free labels, no list support);
+# base + serial are inherited from openmux-base.yaml, `medium` is this image's
+# own key. The medium does NOT use the customer APT repo (target-side only).
+# openmux-install-medium does: root account tweaks, getty/autologin drop-ins,
+# defensive first-boot unit masking, install of the local .debs (hardware,
+# factory-tools, install-menu) + overlayroot, and embedding of the target
+# image.
+#
+# The device's user1 slot is filled by an INERT account (name "user1", no
+# password -> locked): the factory login is root (blank password and
+# autologin, configured by the openmux-install-medium layer and overlay). The
+# built-in account hooks only need a consistent value for the slot to exist.
+
+include:
+  file: openmux-base.yaml
+
+# Section order matters: device: before image: (see openmux-base.yaml).
+device:
+  layer: rpi-cm5
+  class: cm5
+  vendor: openmux
+  hostname: openmux-install-medium
+  # Inert user1 (see the note above): no password + no ssh key = a locked
+  # account that simply exists.
+  user1: user1
+
+image:
+  # Same layout as the target (the embedded target image goes into /opt,
+  # i.e. the ext4 root, so the same 3 GiB cap applies).
+  layer: image-rpios
+  boot_part_size: 200%
+  root_part_size: 300%
+  name: openmux-install-medium-cm5
+
+layer:
+  medium: openmux-install-medium
