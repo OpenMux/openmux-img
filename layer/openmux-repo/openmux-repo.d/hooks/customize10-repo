@@ -1,0 +1,25 @@
+#!/bin/sh
+# openmux-repo — step (per-layer) customize hook.
+#
+# Why a runner hook and NOT an inline `mmdebstrap: customize-hooks:` entry:
+# inline bdebstrap hooks do NOT receive the per-layer env, so `$LAYER_DIR`
+# there expands to EMPTY and any reference to a layer-shipped file dies
+# (earlier inline version died with "sh: cannot open /sources/…"). Only the
+# runner's per-layer hooks get LAYER_NAME/LAYER_DIR/… (bin/runner layer_vars).
+#
+# This hook runs in the CUSTOMIZE phase, at this layer's plan position
+# (openmux-repo must sort AFTER rpi-* and BEFORE openmux-app). At customize
+# time the chroot is a live Debian root, so we can reach the network for
+# `apt-get update`. The `OPENMUX_REPO_URI` env var carries the customer's
+# repo base URI into this host-side shell ($IGconf_om_repo_uri is set by the
+# plan's env merge, see X-Env-Var-repo_uri). When empty the script is a
+# no-op (medium build without a customer repo stays clean).
+#
+# Files it touches (next to this hook in sources/):
+#   50-openmux-repo.sh   - the actual configure-and-upgrade logic.
+#   openmux.sources      - DEB822 definition shipped into /etc/apt/sources.d/
+#   openmux.gpg          - optional, only when a signed repo is configured.
+set -eu
+
+export OPENMUX_REPO_URI="${IGconf_om_repo_uri:-}"
+sh "$LAYER_DIR/sources/50-openmux-repo.sh" "$1"

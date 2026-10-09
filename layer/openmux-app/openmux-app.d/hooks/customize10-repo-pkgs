@@ -1,0 +1,30 @@
+#!/bin/sh
+# openmux-app — step (per-layer) customize hook: install the OpenMux
+# CUSTOM-REPO packages inside the chroot.
+#
+# Why a runner step hook (and not an inline `mmdebstrap: customize-hooks:`
+# entry): inline bdebstrap hooks don't get the per-layer env; more
+# importantly, this hook needs to run AFTER `openmux-repo`'s
+# customize-phase `apt-get update` so the custom repo is known to apt. The
+# runner executes per-layer customize hooks in BUILD-PLAN order, and
+# openmux-app sorts after openmux-repo (this layer declares
+# `X-Env-Layer-Requires: openmux-repo` as belt-and-braces), so the ordering
+# is guaranteed regardless of the number of files each ships.
+#
+# CUSTOM-REPO packages (i.e. ones served by $OPENMUX_REPO_URI) must come in
+# the `pkgs=` list below. Standard distro packages (curl, git, ...) that
+# are already available from the base repositories live in the layer yaml's
+# mmdebstrap: packages: list (essential phase) - do NOT add them here.
+#
+# $1 = chroot target path. Hook runs on the build host with plain sh (dash),
+# so keep this dash-compatible (no arrays, no [[ ]]).
+set -eu
+
+# Space-separated list of custom-repo package names to install at build time.
+# Edit to add OpenMux packages. Left empty -> the hook is a no-op.
+pkgs=""
+
+[ -z "$pkgs" ] && exit 0
+# Note: word splitting on $pkgs is intended (space-separated list).
+# shellcheck disable=SC2086
+DEBIAN_FRONTEND=noninteractive chroot "$1" apt-get install -y $pkgs

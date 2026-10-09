@@ -1,8 +1,8 @@
 
-# OpenMux serial console (appended to config.txt by the openmux-serial-
-# console layer's inline customize-hook). It lands AFTER the
-# rpi-boot-firmware template (layer ordered after it), i.e. appended after
-# ALL [ ] sections, so it applies to [all].
+# OpenMux serial console (appended to the chroot's /boot/firmware/config.txt
+# by the layer's late preimage hook preimage20-config.txt, which runs after
+# every layer's customize phase work). It lands AFTER the rpi-boot-firmware
+# template, i.e. appended after ALL [ ] sections, so it applies to [all].
 #
 # BCM2712 (Pi 5 / CM5) console routing: without these, the active kernel
 # console ends up on a DEBUG uart - on the Pi 5 that is ttyAMA0, which is

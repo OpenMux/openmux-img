@@ -169,11 +169,14 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   (the file is re-generated afterwards). Serial is added FIRST (the primary
   debug channel — firmware boot log, kernel console, login), and the VGA
   console `console=tty1` is deliberately KEPT as the second token so on-screen
-  output still works on a test bench. `config.txt` has no fragment
-  mechanism: the layer appends `enable_uart=1` plus the `dtparam=uart0*`
-  routing lines to the template that `rpi-boot-firmware` installs; the layer
-  declares `X-Env-Layer-Requires: rpi-boot-firmware`, which orders it after
-  that install, so the append survives into the boot vfat.
+  output still works on a test bench. `config.txt` has no fragment mechanism
+  either: a **late preimage runner hook** (`hooks/late/preimage20-config.txt`
+  in the layer `.d/`) appends `enable_uart=1` plus the `dtparam=uart0*`
+  routing lines (from `config-append.txt`) to the template
+  `rpi-boot-firmware` installed in the customize phase; late hooks run after
+  every layer's step hooks/overlays for the phase, so the append survives
+  into the boot vfat. The layer also declares
+  `X-Env-Layer-Requires: rpi-boot-firmware` (belt-and-braces ordering).
   The `dtparam` lines are what actually pin the console to `ttyAMA0` (the
   40-pin PL011) on the CM5: a BCM2712 would otherwise route the debug
   console to a debug UART such as `ttyAMA10` that the CM5's pin header does
@@ -208,6 +211,13 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   `openmux-serial-console` and `openmux-repo` had this; it stayed hidden
   until the built image was inspected). Every hook-carrying layer here is
   nested accordingly.
+- **Inline `mmdebstrap: customize-hooks` do NOT get `$LAYER_DIR`.** The
+  runner only exports `LAYER_DIR`/`LAYER_NAME`/... to *per-layer runner hooks*
+  (`<layer>.d/hooks/**`), not to bdebstrap's inline customize-hooks, where
+  `$LAYER_DIR` expands to empty. If a hook needs to reach files the layer
+  ships, use a runner hook (`hooks/late/preimageNN-…` etc.), not an inline
+  one. `openmux-serial-console`'s `config.txt` append moved to a late hook for
+  exactly this reason.
 - **Transient `apt-get update` signature errors.** If essential dies with
   `sqv ... was created after the --not-after date`, the container clock
   briefly trailed the mirror's InRelease re-signing window; re-run the

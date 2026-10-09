@@ -1,0 +1,22 @@
+#!/bin/sh
+# Append the CM5 UART routing block (see config-append.txt) to the chroot's
+# /boot/firmware/config.txt.
+#
+# Why a hooks/late/preimage hook (and NOT an inline mmdebstrap customize-hook):
+#   1. Inline mmdebstrap: customize-hooks do NOT get the layer's env -
+#      $LAYER_DIR there expands to EMPTY ("cat: /openmux-config.txt: No such
+#      file or directory" -> the whole setup dies, or a no-keyword variant
+#      silently never runs). The engine only exposes LAYER_DIR/LAYER_NAME/...
+#      to per-layer RUNNER hooks (bin/runner layer_vars), which is the mechanism
+#      the engine itself uses for this kind of late file handling (cf.
+#      base/linux-base.d/hooks/late/preimage10-cmdline).
+#   2. Late hooks for a phase run AFTER every layer's step hooks/overlays for
+#      that phase, so the append lands after the rpi-boot-firmware template
+#      install (customize phase) is long gone - ordering vs. rpi-boot-firmware
+#      is then irrelevant, and genimage carries the chroot's
+#      /boot/firmware/* into the boot vfat afterwards.
+#
+# $1 = chroot target path (IGconf_target_path), $2 = image output dir.
+set -eu
+[ -f "$1/boot/firmware/config.txt" ] || exit 0
+cat "$LAYER_DIR/config-append.txt" >> "$1/boot/firmware/config.txt"

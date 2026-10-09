@@ -21,7 +21,7 @@
 # X-Env-Layer-Desc: earlycon is deliberately NOT used: the full UART driver
 # X-Env-Layer-Desc: covers all practical debug and enable_uart=1 covers the
 # X-Env-Layer-Desc: pre-driver (firmware) window.
-# X-Env-Layer-Version: 2.3.0
+# X-Env-Layer-Version: 2.4.0
 # X-Env-Layer-Requires: rpi-boot-firmware
 # X-Env-Layer-Provides: openmux-serial
 #
@@ -46,32 +46,28 @@
 # exact tokens, so the device's own fragments (applied later in the plan)
 # cannot duplicate or re-order anything.
 #
-# config.txt has no fragment mechanism in this engine: rpi-boot-firmware
-# installs its template into the chroot during the customize phase and
-# genimage mcopy's it into the boot vfat afterwards. The inline
-# customize-hook below appends the UART routing lines from
-# openmux-config.txt after the template exists. It used to be clobbered
-# because this layer ordered BEFORE rpi-boot-firmware; `Requires:
-# rpi-boot-firmware` (meta above) now orders it AFTER that layer in the plan,
-# so the append runs after the template install and survives to the vfat.
+# The UART routing lines live in config-append.txt (next to this file) and
+# are appended to the chroot's /boot/firmware/config.txt by the late hook
+# openmux-serial-console.d/hooks/late/preimage20-config.txt. The hook (not an
+# inline mmdebstrap: customize-hook) is what makes this work - inline hooks
+# do not receive the layer environment ($LAYER_DIR expands to EMPTY there,
+# which is why an earlier inline hook died with
+# "cat: /openmux-config.txt: No such file or directory"); only the runner's
+# per-layer hooks get LAYER_DIR/LAYER_NAME/... . A late hook for the phase
+# runs after every layer's step hooks/overlays for that phase, so the append
+# lands after the rpi-boot-firmware template install; genimage then carries
+# the chroot's /boot/firmware/* into the boot vfat. This layer's
+# `X-Env-Layer-Requires: rpi-boot-firmware` (meta above) additionally orders
+# the layer after that install in the plan (harmless here, useful for any
+# future step-phase hook in the layer).
 #
 # There is deliberately NO getty unit: the console= entry makes systemd's
 # getty-generator bring up serial-getty@ttyAMA0 (a hand-enabled getty would
 # double-instance agetty on the same tty). If serial login is missing on
 # real hardware that is a bug to investigate, not to paper over.
-# Inline mmdebstrap hooks MUST be nested under the `mmdebstrap:` key (see
-# every engine layer, e.g. rpi-boot-firmware) - a top-level customize-hooks:
-# in the layer body is silently ignored by the parser (the hook then never
-# runs and nothing reports it).
-mmdebstrap:
-  customize-hooks:
-    # Append the CM5 UART routing block (dtparam=uart0 / uart0_console so
-    # the console lands on the 40-pin PL011 /dev/ttyAMA0, not a debug uart
-    # such as ttyAMA10, plus enable_uart for the firmware's pre-driver
-    # window). The chroot's /boot/firmware/config.txt is the template
-    # rpi-boot-firmware installed, so it now already exists and is appended
-    # to; the append (now ordered after that install, see the Requires meta
-    # above) is carried into the boot vfat by genimage. cmdline.txt is NOT
-    # touched here - the console tokens are guaranteed by the static
-    # for/linux-base/cmdline.d fragment in openmux-serial-console.d/.
-    - cat "$LAYER_DIR/openmux-config.txt" >> "$1/boot/firmware/config.txt"
+# Inline mmdebstrap hooks MUST sit under the `mmdebstrap:` key (see every
+# engine layer, e.g. rpi-boot-firmware) - a top-level customize-hooks: in
+# the layer body is silently ignored by the parser. The layer itself carries
+# no hooks: all of its work is done by the fragment above, the late preimage
+# hook, and config-append.txt.
+# (No YAML mapping required - the engine tolerates a pure-comment body.)

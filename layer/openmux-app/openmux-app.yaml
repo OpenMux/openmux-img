@@ -5,33 +5,32 @@
 # X-Env-Layer-Desc: packages at the essential phase (mmdebstrap packages),
 # X-Env-Layer-Desc: and custom-repo packages via a customize-hook that runs
 # X-Env-Layer-Desc: AFTER openmux-repo's apt-get update.
-# X-Env-Layer-Version: 1.0.2
+# X-Env-Layer-Version: 1.0.3
 # X-Env-Layer-Requires: openmux-repo
 # X-Env-Layer-Provides: openmux-app
 # METAEND
 ---
+# Standard distro packages needed by the OpenMux tooling (curl/git). These
+# are always available from the base repositories, so they install fine at
+# the essential phase (bdebstrap --essential, plain apt - no per-layer env
+# needed, so an inline mmdebstrap: list works fine here).
 mmdebstrap:
-  # Standard distro packages needed by the OpenMux tooling (curl/git). These
-  # are always available from the base repositories, so they install fine at
-  # the essential phase.
   packages:
     - curl
     - git
-  # CUSTOM-REPO packages: a layer's mmdebstrap packages install at the
-  # ESSENTIAL phase, i.e. BEFORE the openmux-repo customize-hook runs its
-  # apt-get update - so repo-served packages CANNOT go in the list above.
-  # This customize-hook runs after openmux-repo (layer order is preserved in
-  # the plan), where the repo is already known to apt. Leave the list empty
-  # when there is no custom repo.
-  customize-hooks:
-    # --- OpenMux custom-repo packages: edit this list ---------------------
-    # NOTE: hooks run under mmdebstrap with plain sh (dash) - keep this
-    # dash-compatible (no arrays, no [[ ]]).
-    - |
-      set -eu
-      # Space-separated list, e.g. pkgs="openmux-agent openmux-agent-dev".
-      # Left empty -> the hook is a no-op.
-      pkgs=""
-      [ -z "$pkgs" ] && exit 0
-      # shellcheck disable=SC2086  (word splitting is the point)
-      DEBIAN_FRONTEND=noninteractive chroot "$1" apt-get install -y $pkgs
+
+# CUSTOM-REPO packages (served by $OPENMUX_REPO_URI) are NOT in the list
+# above: a layer's mmdebstrap packages install at the ESSENTIAL phase, i.e.
+# BEFORE the openmux-repo customize-phase apt-get update - so repo-served
+# packages cannot go there. They are installed by the per-layer RUNNER step
+# hook hooks/customize10-repo-pkgs (flat hooks/<phase>NN-* layout - the
+# runner scans hooks/<phase>* directly, subdirectories are not traversed),
+# which runs in the customize
+# phase in build-plan order AFTER openmux-repo (this layer declares
+# `X-Env-Layer-Requires: openmux-repo` and sorts after it in the plan, so
+# the repo is already known to apt by the time this hook runs). An earlier
+# version used an inline `mmdebstrap: customize-hooks:` entry for the same
+# work; it happened not to reference $LAYER_DIR (so the empty-$LAYER_DIR bug
+# never surfaced there), but a runner step hook is the idiomatic per-layer
+# mechanism and is REQUIRED the moment the hook body needs layer-shipped
+# files. Edit the `pkgs=` list in that hook to add OpenMux packages.
