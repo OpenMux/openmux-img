@@ -1,0 +1,38 @@
+# METABEGIN
+# X-Env-Layer-Name: openmux-extend-filesystem
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: Grow the root partition + ext4 filesystem to fill the
+# X-Env-Layer-Desc: disk on first boot. The stock Raspberry Pi OS autoresize
+# X-Env-Layer-Desc: and the rpi-image-gen engine do not grow the root
+# X-Env-Layer-Desc: partition, so the target image's root.ext4 would stay at
+# X-Env-Layer-Desc: its build-time size and leave the rest of a larger
+# X-Env-Layer-Desc: eMMC/SD/USB disk unused. Mirrors the engine's
+# X-Env-Layer-Desc: cm5-jig-growfs reference (same CM5 hardware): growpart
+# X-Env-Layer-Desc: (cloud-guest-utils) extends the partition, then an online
+# X-Env-Layer-Desc: resize2fs grows the ext4 over the mounted root. Runs
+# X-Env-Layer-Desc: once - a stamp file + ConditionPathExists make every
+# X-Env-Layer-Desc: later boot a no-op. The USB install medium does NOT
+# X-Env-Layer-Desc: select this layer.
+# X-Env-Layer-Version: 1.0.2
+# X-Env-Layer-Requires:
+# X-Env-Layer-Provides: openmux-extend-filesystem
+#
+# METAEND
+---
+mmdebstrap:
+  packages:
+    # growpart is the /usr/bin/growpart binary shipped INSIDE this Debian
+    # package - there is no package literally named "growpart" in trixie
+    # (`apt-get install growpart` fails with "Unable to locate package"),
+    # which is what broke build5. cloud-guest-utils is in the base mirrors
+    # (resolvable in the essential phase) and is listed here exactly like
+    # the reference cm5-jig-desktop layer. resize2fs (e2fsprogs) is already
+    # in the base layer, so nothing else is needed.
+    - cloud-guest-utils
+  customize-hooks:
+    # Enable the first-boot unit. The .d/overlay (unit + script) is applied
+    # by the synthesised pre-config BEFORE the layer's own customize-hooks
+    # (see rpi-image-gen lib/common.sh synth_layer_pre), so the unit file
+    # exists in $1 when this runs. Engine idiom (cf. openssh-server.yaml):
+    # plain scalar, unquoted first word.
+    - $BDEBSTRAP_HOOKS/enable-units "$1" openmux-extend-filesystem

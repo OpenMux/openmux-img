@@ -45,3 +45,6 @@ layer:
   repo: openmux-repo
   packages: openmux-packages
   app: openmux-app
+  # Target only (not the medium): the medium installs the target from a
+  # fixed-size USB stick, so extend-filesystem is not needed there.
+  extend: openmux-extend-filesystem

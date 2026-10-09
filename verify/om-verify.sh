@@ -158,6 +158,14 @@ qa1_owner=$(awk -F: '$1=="qa1" {print $3":"$4; exit}' "$R/etc/passwd")
 fi
 chk   "post_install marker /usr/local/openmux/marker.txt" "$R/usr/local/openmux/marker.txt" 'extra'
 
+# first-boot filesystem extension (openmux-extend-filesystem layer, target only)
+chk   "extend-filesystem script installed" "$R/usr/local/sbin/openmux-extend-filesystem.sh" 'growpart'
+[ -x "$R/usr/local/sbin/openmux-extend-filesystem.sh" ] && ok "extend-filesystem script executable" || bad "extend-filesystem script not executable"
+[ -f "$R/lib/systemd/system/openmux-extend-filesystem.service" ] && ok "extend-filesystem unit present" || bad "extend-filesystem unit missing"
+[ -L "$R/etc/systemd/system/multi-user.target.wants/openmux-extend-filesystem.service" ] \
+  && ok "extend-filesystem.service enabled" || bad "extend-filesystem not enabled"
+[ -f "$R/var/lib/dpkg/info/cloud-guest-utils.list" ] && ok "deb cloud-guest-utils (growpart) installed" || bad "cloud-guest-utils missing"
+
 # packages (local debs from dist/pkgs via openmux-packages layer)
 [ -f "$R/var/lib/dpkg/info/openmux-hardware.list" ] && ok "deb openmux-hardware installed" || bad "openmux-hardware missing"
 [ -f "$R/var/lib/dpkg/info/openmux-factory-tools.list" ] && ok "deb openmux-factory-tools installed" || bad "openmux-factory-tools missing"
@@ -190,7 +198,9 @@ chk   "serial-getty autologin drop-in" "$M/etc/systemd/system/serial-getty@.serv
 chk   "root .bash_profile execs the menu" "$M/root/.bash_profile" 'openmux-menu\.sh'
 [ -x "$M/usr/local/sbin/openmux-menu.sh" ] && ok "openmux-menu.sh installed+exec" || bad "openmux-menu.sh missing"
 [ -f "$M/var/lib/dpkg/info/openmux-install-menu.list" ] && ok "deb openmux-install-menu installed" || bad "install-menu missing"
-[ -f "$M/var/lib/dpkg/info/overlayroot.list" ] && ok "overlayroot installed (menu option 9)" || bad "overlayroot missing"
+[ -f "$M/var/lib/dpkg/info/overlayroot.list" ] && ok "overlayroot installed (menu option 9)" || bad "overlayroot missing"# the medium installs from a fixed-size USB stick - no first-boot resize
+chk_not "medium has NO extend-filesystem unit" "$V/mroot/lib/systemd/system/openmux-extend-filesystem.service" 'openmux-extend-filesystem'
+chk_not "medium has NO extend-filesystem script" "$V/mroot/usr/local/sbin/openmux-extend-filesystem.sh" 'growpart'
 # medium boot vfat also has contents at the partition root (no firmware/)
 chk   "medium cmdline: first console is serial" "$V/mboot/cmdline.txt" '^console=serial0,115200'
 chk   "medium cmdline: tty1 console kept"       "$V/mboot/cmdline.txt" 'console=tty1'

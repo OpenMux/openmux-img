@@ -1,0 +1,15 @@
+[Unit]
+Description=Grow root partition + ext4 filesystem to fill the disk (first boot)
+# Runs once per machine: the script writes a stamp on success, and this
+# condition keeps the unit from even starting on later boots. Deliberately
+# NOT wanted by sysinit - it needs /sys and /run, ready at multi-user.
+After=local-fs.target
+ConditionPathExists=!/var/lib/openmux/growfs-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/openmux-extend-filesystem.sh
+
+[Install]
+WantedBy=multi-user.target
