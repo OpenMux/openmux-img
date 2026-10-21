@@ -98,13 +98,16 @@ R="$V/root"
 # $V/boot. B points at that root.
 B="$V/boot"
 # The LAST console= token is the one that becomes /dev/console, and the
-# initramfs linuxrc plus PID 1 write only to /dev/console - so serial0 must be
-# last or early boot output (and the login prompt) shows up on HDMI instead of
-# the serial port. Order is asserted, not just presence. See the layer header.
-chk       "cmdline.txt: serial console present"        "$B/cmdline.txt" 'console=serial0,115200'
-chk       "cmdline.txt: tty1 (VGA) console kept"       "$B/cmdline.txt" 'console=tty1'
-chk       "cmdline.txt: tty1 before serial"            "$B/cmdline.txt" 'console=tty1.*console=serial0,115200'
-chk_not   "cmdline.txt: serial0 is the LAST console="  "$B/cmdline.txt" 'console=serial0,115200.* console='
+# initramfs linuxrc plus PID 1 write only to /dev/console. Shipping
+# "console=serial0 console=tty1" sent early boot (and the login prompt) to HDMI
+# from the moment the initrd brought up a framebuffer, so the layer asserts
+# serial-only: exactly one console= token, and it is the UART. See the layer
+# header for the full reasoning.
+chk       "cmdline.txt: serial console present"  "$B/cmdline.txt" 'console=serial0,115200'
+chk_not   "cmdline.txt: no console=tty1 (HDMI)"  "$B/cmdline.txt" 'console=tty1'
+[ "$(grep -Eo 'console=[^ ]+' "$B/cmdline.txt" | wc -l)" -eq 1 ] \
+  && ok "cmdline.txt: exactly one console= token" \
+  || bad "cmdline.txt: $(grep -Eo 'console=[^ ]+' "$B/cmdline.txt" | wc -l) console= tokens, want 1 (serial only)"
 chk_not   "cmdline.txt: no stale root=ROOTDEV"   "$B/cmdline.txt" 'ROOTDEV'
 chk_not   "cmdline.txt: single root= token"      "$B/cmdline.txt" 'root=.*root='
 chk       "cmdline.txt: real root device"        "$B/cmdline.txt" 'root=/dev/disk/by-slot/system'
@@ -207,8 +210,10 @@ chk   "root .bash_profile execs the menu" "$M/root/.bash_profile" 'openmux-menu\
 chk_not "medium has NO extend-filesystem unit" "$V/mroot/lib/systemd/system/openmux-extend-filesystem.service" 'openmux-extend-filesystem'
 chk_not "medium has NO extend-filesystem script" "$V/mroot/usr/local/sbin/openmux-extend-filesystem.sh" 'growpart'
 # medium boot vfat also has contents at the partition root (no firmware/)
-chk     "medium cmdline: tty1 before serial"      "$V/mboot/cmdline.txt" 'console=tty1.*console=serial0,115200'
-chk_not "medium cmdline: serial0 is LAST console=" "$V/mboot/cmdline.txt" 'console=serial0,115200.* console='
+# serial-only cmdline here too; the medium's HDMI menu does NOT come from
+# console=tty1 but from the explicit getty@tty1.service enablement checked above
+chk     "medium cmdline: serial console present" "$V/mboot/cmdline.txt" 'console=serial0,115200'
+chk_not "medium cmdline: no console=tty1"        "$V/mboot/cmdline.txt" 'console=tty1'
 chk   "medium config.txt: dtparam=uart0 lines"  "$V/mboot/config.txt"  'dtparam=uart0_console=on'
 
 # embedded target image must be the exact target artefact from dist/

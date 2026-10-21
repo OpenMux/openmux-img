@@ -163,19 +163,24 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 - **Serial console.** `console=serial0,115200` on the CM5 is the PL011
   (`ttyAMA0`). The console token set is guaranteed by a static
   `for/linux-base/cmdline.d` fragment shipped in the layer
-  (`-console=* +console=tty1 +console=serial0,115200`): the engine assembles
+  (`-console=* +console=serial0,115200`): the engine assembles
   `cmdline.txt` from the fragment files of the build plan during the preimage
   phase, which is why editing `cmdline.txt` in a customize-hook is a dead end
-  (the file is re-generated afterwards). **The order is load-bearing** - the
-  LAST `console=` parameter is the device that becomes `/dev/console`, and the
-  initramfs `init` and PID 1 log only there. With `tty1` last, boot jumped to
-  HDMI the moment the initrd ran (as soon as `vc4-kms-v3d` created a
-  framebuffer) even though the kernel had printed to serial up to that point.
-  Serial is therefore added LAST and the VGA console `console=tty1` is kept as
-  an earlier token: kernel messages are still mirrored to HDMI for a test
-  bench, but the real console stays on the serial port. Login is unaffected
-  either way, since systemd's `getty-generator` adds a serial getty for every
-  active kernel console. `config.txt` has no fragment mechanism
+  (the file is re-generated afterwards). The fragment deliberately ends up with
+  **serial as the only `console=` token**. The LAST `console=` parameter is the
+  device that becomes `/dev/console`, and the initramfs `init` and PID 1 log
+  *only* there: with the engine default `console=serial0,115200 console=tty1`
+  the boot log looked fine on serial and then jumped to HDMI exactly when the
+  initrd ran (that is when `vc4-kms-v3d` first creates a visible framebuffer).
+  Rather than keep `tty1` as an earlier token - which would still duplicate the
+  kernel log onto an HDMI port this appliance does not debug over - it is
+  dropped: `/dev/console` can then never be the framebuffer. No `console=tty1`
+  also means no `getty@tty1` (systemd's `getty-generator` only walks active
+  kernel consoles), so HDMI shows nothing after the boot log; that is intended
+  for a headless device. The install medium still gets its on-screen menu
+  because `openmux-install-medium` enables `getty@tty1.service` explicitly. If
+  a bench ever needs VT output, add `console=tty1` at the END of the boot
+  partition's `cmdline.txt`. `config.txt` has no fragment mechanism
   either: a **late preimage runner hook** (`hooks/late/preimage20-config.txt`
   in the layer `.d/`) appends `enable_uart=1` plus the `dtparam=uart0*`
   routing lines (from `config-append.txt`) to the template
