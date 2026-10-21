@@ -116,6 +116,11 @@ chk_not   "cmdline.txt: single root= token"      "$B/cmdline.txt" 'root=.*root='
 # The target boots from eMMC (firmware boot-mode 1), so the by-slot symlinks DO
 # exist here - unlike the USB medium, see the medium section below.
 chk       "cmdline.txt: real root device"        "$B/cmdline.txt" 'root=/dev/disk/by-slot/system'
+# fstab must agree, and must NOT reference PARTUUID: that is what lets the installer
+# leave a freshly written disk's signature alone (openmux-menu.sh regenerate_disk_ids).
+chk       "fstab root is by-slot/system"   "$R/etc/fstab" '^/dev/disk/by-slot/system[ ]+/'
+chk       "fstab boot is by-slot/boot"     "$R/etc/fstab" '^/dev/disk/by-slot/boot[ ]+/boot/firmware'
+chk_not   "fstab has no PARTUUID reference" "$R/etc/fstab" 'PARTUUID='
 chk       "config.txt: enable_uart=1"            "$B/config.txt"  'enable_uart=1'
 chk       "config.txt: dtparam=uart0=on"         "$B/config.txt"  'dtparam=uart0=on'
 chk       "config.txt: dtparam=uart0_console=on" "$B/config.txt"  'dtparam=uart0_console=on'

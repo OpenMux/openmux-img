@@ -151,12 +151,21 @@ disk_part() {
   fi
 }
 
-# All units flashed from the same source image share the same MBR disk id, and therefore
-# the same PARTUUIDs (and root/boot fstab & cmdline.txt reference those PARTUUIDs). If the
-# freshly-written disk and this install medium (or another unit) are ever attached at the
-# same time, the duplicate PARTUUIDs are ambiguous and the wrong device can get mounted,
-# which shows up as boot failures like "systemd-remount-fs.service" failing. Give every
-# freshly-installed disk a fresh, unique disk id to avoid that.
+# Units written from one source image all share the image's MBR disk signature and
+# therefore the same PARTUUIDs. That is only a problem for images that ADDRESS their
+# partitions by PARTUUID: the stick and a freshly installed disk (or two units on a QC
+# bench) then present duplicate identifiers, the wrong device can be mounted, and it
+# shows up as e.g. systemd-remount-fs.service failing. Such an image must also have its
+# cmdline.txt/fstab rewritten to the new signature or it will not boot.
+#
+# Whether an installed disk needs any of this is a property of the IMAGE, not of the
+# installer, so it is read off the disk we just wrote instead of being assumed: our
+# target addresses root and boot through /dev/disk/by-slot/* (image-rpios' rule plus the
+# rpi-storage-binder tag, both scoped to the BOOT device), which no second disk can
+# shadow, and it carries no PARTUUID reference at all. Re-signing it would change an
+# identifier nothing resolves and then end in two bogus warnings - "cmdline.txt /
+# /etc/fstab does not reference the new PARTUUID" - because the rewrites below have
+# nothing to match. That is the normal state of a by-slot image, not a fault.
 regenerate_disk_ids() {
   local disk="$1"
   local boot_part root_part
@@ -176,8 +185,25 @@ regenerate_disk_ids() {
     msg "WARNING: could not find partitions on $disk; skipping disk ID regeneration."
     return 0
   fi
+
+  # Ask the installed image itself how it finds its root; the kernel takes the LAST root= token.
+  local tmp_boot root_ref=""
+  tmp_boot="$(mktemp -d)"
+  if mount -o ro "$boot_part" "$tmp_boot" 2>/dev/null; then
+    root_ref="$(grep -oE 'root=[^ ]+' "$tmp_boot/cmdline.txt" 2>/dev/null | tail -n1)"
+    umount "$tmp_boot" 2>/dev/null || true
+  fi
+  rmdir "$tmp_boot" 2>/dev/null || true
+  case $root_ref in
+    root=PARTUUID=*) : ;;   # addressed by PARTUUID: re-signing and rewriting are required
+    *)
+      msg "Root is referenced by '${root_ref:-nothing}' rather than PARTUUID, so this disk shares no boot-critical identifier with other units; leaving its disk ID alone."
+      return 0
+      ;;
+  esac
+
   if ! command -v sfdisk >/dev/null 2>&1; then
-    msg "WARNING: sfdisk not found; skipping disk ID regeneration (PARTUUID may collide with other devices)."
+    msg "WARNING: this image boots by PARTUUID but sfdisk is unavailable, so the disk ID cannot be regenerated (PARTUUID will collide with other units)."
     return 0
   fi
 
@@ -223,6 +249,10 @@ regenerate_disk_ids() {
   umount "$tmp_root" 2>/dev/null || true
   rmdir "$tmp_boot" "$tmp_root" 2>/dev/null || true
 
+  # Only PARTUUID images reach this point (see the root= check above). Unique filesystem
+  # UUIDs matter for the same duplicate-identifier reason; note that the immutable A/B
+  # layout deliberately keeps identical per-slot UUIDs and resolves slots by PARTLABEL,
+  # so an image of that family must not have them randomised here.
   if command -v tune2fs >/dev/null 2>&1; then
     e2fsck -f -y "$root_part" >/dev/null 2>&1 || true
     tune2fs -U random "$root_part" >/dev/null 2>&1 || true
