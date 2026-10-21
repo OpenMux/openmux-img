@@ -12,16 +12,20 @@
 # X-Env-Layer-Desc: console to a debug uart such as ttyAMA10, unavailable on
 # X-Env-Layer-Desc: CM5);
 # X-Env-Layer-Desc: (2) full kernel console -> a cmdline.d fragment makes
-# X-Env-Layer-Desc: console=serial0,115200 the FIRST console token; the VGA
-# X-Env-Layer-Desc: console (console=tty1) is kept (kept, not removed, so
-# X-Env-Layer-Desc: any on-screen output still works on a test bench);
+# X-Env-Layer-Desc: console=serial0,115200 the LAST console token (the last
+# X-Env-Layer-Desc: one is /dev/console, which is what the initramfs and PID 1
+# X-Env-Layer-Desc: write to); the VGA console (console=tty1) is kept FIRST, so
+# X-Env-Layer-Desc: kernel messages still appear on screen on a test bench
+# X-Env-Layer-Desc: without taking /dev/console away from the UART;
 # X-Env-Layer-Desc: (3) login prompt -> systemd's getty-generator provides
-# X-Env-Layer-Desc: serial-getty@ttyAMA0 automatically because the tty is a
-# X-Env-Layer-Desc: kernel console - no unit creation or enabling here.
+# X-Env-Layer-Desc: serial-getty@ttyAMA0: it walks every active kernel console
+# X-Env-Layer-Desc: and adds a serial getty for each non-VC one, so the login
+# X-Env-Layer-Desc: prompt does not depend on the console= order - no unit
+# X-Env-Layer-Desc: creation or enabling here.
 # X-Env-Layer-Desc: earlycon is deliberately NOT used: the full UART driver
 # X-Env-Layer-Desc: covers all practical debug and enable_uart=1 covers the
 # X-Env-Layer-Desc: pre-driver (firmware) window.
-# X-Env-Layer-Version: 2.4.0
+# X-Env-Layer-Version: 2.5.0
 # X-Env-Layer-Requires: rpi-boot-firmware
 # X-Env-Layer-Provides: openmux-serial
 #
@@ -37,14 +41,26 @@
 # fragment lives in family-base.d/for/linux-base/cmdline.d/; the scan is
 # <layer-name>.d/for/linux-base/cmdline.d/, NOT the layer root):
 #   openmux-serial-console.d/for/linux-base/cmdline.d/10-openmux-serial:
-#     -console=* +console=serial0,115200 +console=tty1
+#     -console=* +console=tty1 +console=serial0,115200
 # (a fragment must be exactly ONE line).
-# `-console=*` strips whatever the device defaults put in, then the serial
-# console is ADDed FIRST and the VGA console (tty1) is kept second, so the
-# result is deterministic and self-contained: serial0 is the first console
-# token no matter what the device layer provides. The assembler dedupes
-# exact tokens, so the device's own fragments (applied later in the plan)
-# cannot duplicate or re-order anything.
+# `-console=*` strips whatever the device defaults put in, then the VGA
+# console (tty1) is added and the serial console LAST, so the result is
+# deterministic and self-contained: serial0 is the final console token no
+# matter what the device layer provides. The assembler dedupes exact tokens
+# (keep-first), so the device's own fragments cannot duplicate or re-order
+# anything.
+#
+# THE ORDER IS THE WHOLE POINT. The kernel registers a console for every
+# console= token and printk copies to all of them, but the LAST token is the
+# one that becomes /dev/console - and userspace never writes to "all
+# consoles": the initramfs /init and PID 1 write to /dev/console only. With
+# serial0 first, the initramfs messages, the systemd status lines and a
+# "Kernel panic" banner all went to the framebuffer instead of the UART
+# (seen on hardware: kernel log fine on serial, then the output moves to HDMI
+# exactly when the initrd starts - that is also when vc4-kms-v3d first brings
+# up a visible framebuffer, which is what made the switch noticeable).
+# Keeping console=tty1 first still mirrors every kernel message to HDMI, so a
+# bench with a monitor attached loses nothing.
 #
 # The UART routing lines live in config-append.txt (next to this file) and
 # are appended to the chroot's /boot/firmware/config.txt by the late hook

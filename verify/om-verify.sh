@@ -97,9 +97,14 @@ R="$V/root"
 # the vfat root, so cmdline.txt / config.txt / kernel_* are directly under
 # $V/boot. B points at that root.
 B="$V/boot"
-chk       "cmdline.txt: serial console present"  "$B/cmdline.txt" 'console=serial0,115200'
-chk       "cmdline.txt: first console is serial" "$B/cmdline.txt" '^console=serial0,115200'
-chk       "cmdline.txt: tty1 (VGA) console kept" "$B/cmdline.txt" 'console=tty1'
+# The LAST console= token is the one that becomes /dev/console, and the
+# initramfs linuxrc plus PID 1 write only to /dev/console - so serial0 must be
+# last or early boot output (and the login prompt) shows up on HDMI instead of
+# the serial port. Order is asserted, not just presence. See the layer header.
+chk       "cmdline.txt: serial console present"        "$B/cmdline.txt" 'console=serial0,115200'
+chk       "cmdline.txt: tty1 (VGA) console kept"       "$B/cmdline.txt" 'console=tty1'
+chk       "cmdline.txt: tty1 before serial"            "$B/cmdline.txt" 'console=tty1.*console=serial0,115200'
+chk_not   "cmdline.txt: serial0 is the LAST console="  "$B/cmdline.txt" 'console=serial0,115200.* console='
 chk_not   "cmdline.txt: no stale root=ROOTDEV"   "$B/cmdline.txt" 'ROOTDEV'
 chk_not   "cmdline.txt: single root= token"      "$B/cmdline.txt" 'root=.*root='
 chk       "cmdline.txt: real root device"        "$B/cmdline.txt" 'root=/dev/disk/by-slot/system'
@@ -202,8 +207,8 @@ chk   "root .bash_profile execs the menu" "$M/root/.bash_profile" 'openmux-menu\
 chk_not "medium has NO extend-filesystem unit" "$V/mroot/lib/systemd/system/openmux-extend-filesystem.service" 'openmux-extend-filesystem'
 chk_not "medium has NO extend-filesystem script" "$V/mroot/usr/local/sbin/openmux-extend-filesystem.sh" 'growpart'
 # medium boot vfat also has contents at the partition root (no firmware/)
-chk   "medium cmdline: first console is serial" "$V/mboot/cmdline.txt" '^console=serial0,115200'
-chk   "medium cmdline: tty1 console kept"       "$V/mboot/cmdline.txt" 'console=tty1'
+chk     "medium cmdline: tty1 before serial"      "$V/mboot/cmdline.txt" 'console=tty1.*console=serial0,115200'
+chk_not "medium cmdline: serial0 is LAST console=" "$V/mboot/cmdline.txt" 'console=serial0,115200.* console='
 chk   "medium config.txt: dtparam=uart0 lines"  "$V/mboot/config.txt"  'dtparam=uart0_console=on'
 
 # embedded target image must be the exact target artefact from dist/

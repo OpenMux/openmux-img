@@ -163,13 +163,19 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 - **Serial console.** `console=serial0,115200` on the CM5 is the PL011
   (`ttyAMA0`). The console token set is guaranteed by a static
   `for/linux-base/cmdline.d` fragment shipped in the layer
-  (`-console=* +console=serial0,115200 +console=tty1`): the engine assembles
+  (`-console=* +console=tty1 +console=serial0,115200`): the engine assembles
   `cmdline.txt` from the fragment files of the build plan during the preimage
   phase, which is why editing `cmdline.txt` in a customize-hook is a dead end
-  (the file is re-generated afterwards). Serial is added FIRST (the primary
-  debug channel — firmware boot log, kernel console, login), and the VGA
-  console `console=tty1` is deliberately KEPT as the second token so on-screen
-  output still works on a test bench. `config.txt` has no fragment mechanism
+  (the file is re-generated afterwards). **The order is load-bearing** - the
+  LAST `console=` parameter is the device that becomes `/dev/console`, and the
+  initramfs `init` and PID 1 log only there. With `tty1` last, boot jumped to
+  HDMI the moment the initrd ran (as soon as `vc4-kms-v3d` created a
+  framebuffer) even though the kernel had printed to serial up to that point.
+  Serial is therefore added LAST and the VGA console `console=tty1` is kept as
+  an earlier token: kernel messages are still mirrored to HDMI for a test
+  bench, but the real console stays on the serial port. Login is unaffected
+  either way, since systemd's `getty-generator` adds a serial getty for every
+  active kernel console. `config.txt` has no fragment mechanism
   either: a **late preimage runner hook** (`hooks/late/preimage20-config.txt`
   in the layer `.d/`) appends `enable_uart=1` plus the `dtparam=uart0*`
   routing lines (from `config-append.txt`) to the template
