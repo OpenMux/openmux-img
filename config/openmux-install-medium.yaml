@@ -38,6 +38,24 @@ image:
   boot_part_size: 200%
   root_part_size: 300%
   name: openmux-install-medium-cm5
+  # MANDATORY for this image: it boots from a USB stick.
+  # The default (by-slot) puts root=/dev/disk/by-slot/system on the kernel
+  # cmdline, but those symlinks can never exist on a USB-booted system: they
+  # are created by image-rpios's 99-rpi-05-image.rules for partitions the
+  # rpi-storage-binder tags RPI_ONBOOTDEV=1, and the tagger
+  # (/usr/bin/rpi-bootdev-tag) only maps the firmware boot-mode to a block
+  # device for SD/eMMC (1 -> mmcblk0) and NVMe (6 -> nvme0n1) - and the rule
+  # itself only matches mmcblk0p*/nvme0n1p*/dm-*, never the sdX a USB stick
+  # gets. The initramfs therefore waits, gives up and panics:
+  #   ALERT!  /dev/disk/by-slot/system does not exist.  Dropping to a shell!
+  # (this was invisible for as long as early boot went to HDMI - see the
+  # openmux-serial-console layer).
+  # partuuid makes the same layout emit root=PARTUUID=<disk-signature>-02 on
+  # the cmdline and matching PARTUUID entries in /etc/fstab - resolved by
+  # initramfs/udev, drive-name independent, so the stick stays flashable to any
+  # USB device. Only allowed because the medium's partition map is 'clear'
+  # (no LUKS: a dm root would have no PARTUUID of its own).
+  devid_scheme: partuuid
 
 layer:
   medium: openmux-install-medium

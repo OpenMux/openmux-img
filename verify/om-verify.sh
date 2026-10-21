@@ -113,6 +113,8 @@ chk_not   "cmdline.txt: no console=tty1 (HDMI)"  "$B/cmdline.txt" 'console=tty1'
   || bad "cmdline.txt: $(grep -Eo 'console=[^ ]+' "$B/cmdline.txt" | wc -l) console= tokens, want 1 (serial only)"
 chk_not   "cmdline.txt: no stale root=ROOTDEV"   "$B/cmdline.txt" 'ROOTDEV'
 chk_not   "cmdline.txt: single root= token"      "$B/cmdline.txt" 'root=.*root='
+# The target boots from eMMC (firmware boot-mode 1), so the by-slot symlinks DO
+# exist here - unlike the USB medium, see the medium section below.
 chk       "cmdline.txt: real root device"        "$B/cmdline.txt" 'root=/dev/disk/by-slot/system'
 chk       "config.txt: enable_uart=1"            "$B/config.txt"  'enable_uart=1'
 chk       "config.txt: dtparam=uart0=on"         "$B/config.txt"  'dtparam=uart0=on'
@@ -217,6 +219,15 @@ chk_not "medium has NO extend-filesystem script" "$V/mroot/usr/local/sbin/openmu
 # console=tty1 but from the explicit getty@tty1.service enablement checked above
 chk     "medium cmdline: serial console present" "$V/mboot/cmdline.txt" 'console=serial0,115200'
 chk_not "medium cmdline: no console=tty1"        "$V/mboot/cmdline.txt" 'console=tty1'
+# The medium boots from USB: /dev/disk/by-slot/* can never exist there
+# (rpi-storage-binder maps firmware boot-mode 1=mmcblk0/6=nvme0n1 only, and
+# image-rpios's rule matches no sdX). root= must therefore be PARTUUID-based,
+# and the fstab has to agree with it - otherwise the medium boots to
+# "ALERT! /dev/disk/by-slot/system does not exist".
+chk       "medium cmdline root=PARTUUID"     "$V/mboot/cmdline.txt" 'root=PARTUUID=[0-9a-f]{8}-02'
+chk_not   "medium cmdline has no by-slot ref" "$V/mboot/cmdline.txt" 'by-slot'
+chk       "medium fstab root is PARTUUID"    "$M/etc/fstab" '^PARTUUID=[0-9a-f]{8}-02[ ]+/'
+chk_not   "medium fstab has no by-slot ref"  "$M/etc/fstab" 'by-slot'
 chk   "medium config.txt: dtparam=uart0 lines"  "$V/mboot/config.txt"  'dtparam=uart0_console=on'
 
 # embedded target image must be the exact target artefact from dist/

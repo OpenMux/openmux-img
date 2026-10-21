@@ -43,6 +43,15 @@ image:
   # packages. Raise this if the image set grows.
   root_part_size: 300%
   name: openmux-cm5
+  # Stated explicitly (not left to the layer default) because it is
+  # boot-critical: this image boots from eMMC, where the firmware boot-mode is
+  # 1, so rpi-storage-binder tags the partitions and image-rpios's udev rule
+  # can create /dev/disk/by-slot/{boot,system} - a boot-medium-relative root,
+  # which is what an A/B (rota) layout needs: the same rootfs works in either
+  # slot. The USB install medium CANNOT use this (boot-mode is not 1/6 and the
+  # rule never matches the sdX a stick gets) and sets partuuid instead - see
+  # config/openmux-install-medium.yaml.
+  devid_scheme: by-slot
 
 layer:
   # openmux-repo (the custom APT repo) is not complete yet, so it is left out:
