@@ -10,13 +10,16 @@
 # "openmux" is reserved for a future OpenMux system account.
 #
 # The `layer:` map selects ONE layer per key (keys are free labels, no list
-# support). This image's own keys are repo/packages/app; base + serial are
+# support). This image's own keys are packages/extend; base + serial are
 # inherited from openmux-base.yaml. The build resolves the union and completes
 # the dependency graph; hook execution order follows the resolved build plan
-# (deps + provides), not the key order here. Target order: openmux-repo sets
-# the APT repo, openmux-packages installs the local .debs, openmux-app adds
-# the distro + custom-repo packages. The materialized buildspec hooks (user
-# account + post_install) run AFTER every layer hook.
+# (deps + provides), not the key order here. openmux-packages installs the
+# local .debs (its apt deps come from Debian main, so it needs no custom
+# repo). The materialized buildspec hooks (user account + post_install) run
+# AFTER every layer hook.
+#
+# openmux-repo and openmux-app are currently NOT selected - the custom APT
+# repo is not finished. See the `layer:` section below to re-enable them.
 
 include:
   file: openmux-base.yaml
@@ -42,9 +45,17 @@ image:
   name: openmux-cm5
 
 layer:
-  repo: openmux-repo
+  # openmux-repo (the custom APT repo) is not complete yet, so it is left out:
+  # a layer is selected by giving it a key, and dropping the key disables it.
+  # NOTE: openmux-app declares `X-Env-Layer-Requires: openmux-repo`, so it must
+  # stay out too - selecting it would force the repo back into the plan. To
+  # re-enable the custom repo + its package list (and the curl/git distro
+  # packages openmux-app adds), restore both keys:
+  #   repo: openmux-repo
+  #   app: openmux-app
+  # repo: openmux-repo
   packages: openmux-packages
-  app: openmux-app
+  # app: openmux-app
   # Target only (not the medium): the medium installs the target from a
   # fixed-size USB stick, so extend-filesystem is not needed there.
   extend: openmux-extend-filesystem
