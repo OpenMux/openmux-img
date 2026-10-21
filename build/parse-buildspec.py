@@ -14,7 +14,8 @@ Usage:
 
   <buildspec.yaml>   the customer build spec
   <outdir>           directory to write into: overrides.env,
-                     hooks/customize94-openmux-users (only if users:)
+                     hooks/customize94-openmux-users (only if users:),
+                     keys/<admin>.pub (only if admin-user has inline keys)
   --specdir DIR      directory `key_file` entries are relative to (the build
                      spec's own directory; defaults to the spec's dir)
   --cwd REPO_ROOT    only used if you pass ABS path semantics; the emitted ssh
@@ -51,6 +52,10 @@ PASS_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$
 # path is valid inside the container).
 SPECDIR = os.getcwd()
 KEY_FILES = {}  # ctx -> absolute resolved key_file path
+# Where INLINE keys are materialized (<outdir>/keys, set in main()). Public
+# keys only; lives under work/ (git-ignored) and entry.sh removes it after
+# the build.
+KEYDIR = None
 
 # Reserved names: 'openmux' is kept for a future OpenMux system account,
 # 'root' is not a regular account.
@@ -130,6 +135,24 @@ def keys_or_file(keys, key_file, ctx):
         check_key(line, f"line {i}")
         out.append(line)
     return out
+
+
+def write_key_file(path, key_lines):
+    """Write validated key lines (one per line) to `path`, return its ABS path.
+
+    The generator's user1 ssh hook branches on `[ -f "$IGconf_ssh_pubkey_user1" ]`
+    and cats the whole file into authorized_keys, so a file we generate here is
+    consumed exactly like a customer-supplied `key_file` - which is how MORE
+    THAN ONE inline key reaches the built-in user1 account (the fallback branch
+    is a single `echo`, i.e. one key at most).
+
+    Public keys only, hence 0644: the build hook reads it container-side."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for k in key_lines:
+            f.write(k.rstrip("\n") + "\n")
+    os.chmod(path, 0o644)
+    return os.path.abspath(path)
 
 
 def groups_list(g, ctx):
@@ -215,9 +238,10 @@ def main():
 
     # key_file / post_install paths are customer paths, relative to the build
     # spec's own directory.
-    global SPECDIR
+    global SPECDIR, KEYDIR
     SPECDIR = os.path.abspath(args.specdir or os.path.dirname(args.buildspec) or ".")
     os.makedirs(os.path.join(args.outdir, "hooks"), exist_ok=True)
+    KEYDIR = os.path.join(args.outdir, "keys")
 
     # ---- admin-user (the generator's built-in user1 slot) -------------------
     admin = spec.get("admin-user") or {}
@@ -256,15 +280,11 @@ def main():
             fail(f"admin-user.gid: must be an integer {UID_MIN}-{UID_MAX}")
     groups = groups_list(admin.get("groups"), "admin-user.groups")
 
+    # Any number of inline keys is allowed: they are materialized into a
+    # build-time key file below (see write_key_file), which the generator's
+    # hook cat's just like a customer key_file.
     admin_keys = keys_or_file(as_str_list(admin.get("keys"), "admin-user.keys"),
                               admin.get("key_file"), "admin-user")
-    # The built-in ssh layer writes the pubkey via the generator's override
-    # stream, which is line-oriented: exactly ONE inline key. Several keys go
-    # in a file referenced by key_file (the hook cat's the whole file).
-    if len(admin_keys) > 1 and not admin.get("key_file"):
-        fail("admin-user.keys: only ONE inline key is supported for the built-in "
-             "user1 account; for several keys put them in a file (one per line) "
-             "and use 'key_file' instead")
 
     # ---- users: (generated hook path) --------------------------------------
     users = spec.get("users") or []
@@ -316,9 +336,13 @@ def main():
         # /src/keys/my.pub in the container).
         env.append(("IGconf_ssh_pubkey_user1", KEY_FILES["admin-user"]))
     elif admin_keys:
-        # Inline: exactly one key. The generator's hook does
-        # echo "<var>" > authorized_keys, so the value must be one line.
-        env.append(("IGconf_ssh_pubkey_user1", admin_keys[0]))
+        # Inline (one OR several keys): write them to <outdir>/keys/<name>.pub
+        # and hand the generator that path, so every key lands in
+        # authorized_keys via the hook's file branch. Materialized here, in the
+        # emission section, so the spec stays fully validated before anything
+        # is written. entry.sh removes the file after the build.
+        env.append(("IGconf_ssh_pubkey_user1",
+                    write_key_file(os.path.join(KEYDIR, f"{name}.pub"), admin_keys)))
     if args.repo_uri:
         env.append(("IGconf_om_repo_uri", args.repo_uri))
 

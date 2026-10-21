@@ -39,11 +39,15 @@ admin-user:
   groups:
     - adm
 
-  # SSH access: EITHER one inline key (placeholder - REPLACE with a real
-  # public key):
+  # SSH access - EITHER one or more inline keys (placeholder: REPLACE with
+  # real public keys). Any number works: the builder writes them to a
+  # temporary authorized_keys file and feeds that to the image build.
   keys:
     - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyReplaceMe0000000000 admin@example"
-  # ...OR a file with several keys (one per line) - multiple keys need this:
+    # - "ssh-ed25519 AAAA... admin@second-host"
+  # ...OR a file holding the keys (one per line) - same result, for when the
+  # keys live in a file rather than in the spec. `keys` and `key_file` are
+  # mutually exclusive.
   # (path relative to this file's directory; the file must exist)
   # key_file: keys/admin.pub
 

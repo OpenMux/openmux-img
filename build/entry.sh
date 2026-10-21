@@ -86,6 +86,9 @@ build_target() {
     echo
     echo ">> [3/5] parsing build spec: $BUILDSPEC"
     local parse_out="$SRC/work/buildspec"
+    # Fresh every build: a stale overrides.env, generated hook or key file from
+    # a PREVIOUS (customer) spec must never leak into this one.
+    rm -rf "$parse_out"
     mkdir -p "$parse_out/hooks"
     # key_file / post_install are customer paths, resolved relative to the
     # build spec's own directory; the ABS path emitted into overrides.env is
@@ -106,6 +109,21 @@ build_target() {
              "primary account will be LOCKED (no password login). SSH keys in the" \
              "spec, or on-device setup, will be the only way in." >&2
     fi
+
+    # Inline keys are materialized to $parse_out/keys/<name>.pub and the
+    # override carries that PATH. If the file were missing, the generator's
+    # ssh hook would take its [ -f ] test as false and fall through to the
+    # echo branch, writing the PATH STRING into authorized_keys - silently
+    # broken SSH. Check instead of shipping a bad image.
+    ssh_line="$(grep -m1 '^IGconf_ssh_pubkey_user1=' "$parse_out/overrides.env" || true)"
+    ssh_key="${ssh_line#IGconf_ssh_pubkey_user1=}"
+    ssh_key="${ssh_key#\'}"; ssh_key="${ssh_key%\'}"
+    case "$ssh_key" in
+        "$parse_out"/keys/*)
+            [ -f "$ssh_key" ] || die "generated key file is missing: $ssh_key"
+            echo ">> admin SSH key file: $ssh_key ($(wc -l < "$ssh_key") key(s))"
+            ;;
+    esac
 
     # Overrides as KEY=VALUE args (secrets never reach argv beyond these vars;
     # they are parsed here from the mounted file, exactly per the plan).
@@ -201,6 +219,10 @@ MED_IMG="${MED_IMG:-}"
 for h in "${GENERATED_HOOKS[@]:-}"; do
     [ -n "$h" ] && rm -f "$SRC/hooks/$h"
 done
+
+# Remove the key file generated from inline build-spec keys (public keys only,
+# and work/ is git-ignored - this only keeps out customer-specific material).
+rm -rf "$SRC/work/buildspec/keys"
 
 echo
 echo "=============================================================="
