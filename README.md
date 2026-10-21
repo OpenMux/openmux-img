@@ -180,14 +180,25 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   for a headless device. The install medium still gets its on-screen menu
   because `openmux-install-medium` enables `getty@tty1.service` explicitly. If
   a bench ever needs VT output, add `console=tty1` at the END of the boot
-  partition's `cmdline.txt`. `config.txt` has no fragment mechanism
+  partition's `cmdline.txt`. **Plan order, not the fragment's contents, is what
+  makes the strip work**: fragments are applied in build-plan order and the
+  family-base layer (`rpi-device-base`) contributes the default
+  `console=serial0,115200 console=tty1 root=ROOTDEV fsck.repair=yes rootwait`.
+  While `openmux-serial-console` required only `rpi-boot-firmware` it was
+  planned *before* the family defaults, so `-console=*` had nothing to remove
+  and `console=tty1` was appended right after it (its `console=serial0,115200`
+  was dropped as a duplicate, which made the fragment look like it was being
+  honoured). Two commits changing the fragment were therefore complete no-ops
+  and the shipped `cmdline.txt` kept `tty1` last. `X-Env-Layer-Requires:
+  rpi-boot-firmware,rpi-device-base` is what makes the override land, and
+  `om-verify.sh` asserting exactly one `console=` token is what catches it if
+  the ordering is ever broken again. `config.txt` has no fragment mechanism
   either: a **late preimage runner hook** (`hooks/late/preimage20-config.txt`
   in the layer `.d/`) appends `enable_uart=1` plus the `dtparam=uart0*`
   routing lines (from `config-append.txt`) to the template
   `rpi-boot-firmware` installed in the customize phase; late hooks run after
   every layer's step hooks/overlays for the phase, so the append survives
-  into the boot vfat. The layer also declares
-  `X-Env-Layer-Requires: rpi-boot-firmware` (belt-and-braces ordering).
+  into the boot vfat.
   The `dtparam` lines are what actually pin the console to `ttyAMA0` (the
   40-pin PL011) on the CM5: a BCM2712 would otherwise route the debug
   console to a debug UART such as `ttyAMA10` that the CM5's pin header does

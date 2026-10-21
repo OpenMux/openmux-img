@@ -12,11 +12,13 @@
 # X-Env-Layer-Desc: console to a debug uart such as ttyAMA10, unavailable on
 # X-Env-Layer-Desc: CM5);
 # X-Env-Layer-Desc: (2) full kernel console -> a cmdline.d fragment strips
-# X-Env-Layer-Desc: every console token the device defaults contribute and adds
-# X-Env-Layer-Desc: the single console=serial0,115200, which is therefore also
+# X-Env-Layer-Desc: every console token other layers contribute and adds the
+# X-Env-Layer-Desc: single console=serial0,115200, which is therefore also
 # X-Env-Layer-Desc: /dev/console - the only device the initramfs and PID 1
-# X-Env-Layer-Desc: write to. console=tty1 is deliberately NOT added (see the
-# X-Env-Layer-Desc: "why no console=tty1" note in the body);
+# X-Env-Layer-Desc: write to. Fragments are applied in PLAN order, so this
+# X-Env-Layer-Desc: layer must be planned after the family-base defaults for
+# X-Env-Layer-Desc: the strip to work (see the Requires below); console=tty1 is
+# X-Env-Layer-Desc: deliberately NOT added;
 # X-Env-Layer-Desc: (3) login prompt -> systemd's getty-generator provides
 # X-Env-Layer-Desc: serial-getty@ttyAMA0: it walks every active kernel console
 # X-Env-Layer-Desc: and adds a serial getty for each non-VC one, so the login
@@ -25,8 +27,8 @@
 # X-Env-Layer-Desc: earlycon is deliberately NOT used: the full UART driver
 # X-Env-Layer-Desc: covers all practical debug and enable_uart=1 covers the
 # X-Env-Layer-Desc: pre-driver (firmware) window.
-# X-Env-Layer-Version: 3.0.0
-# X-Env-Layer-Requires: rpi-boot-firmware
+# X-Env-Layer-Version: 3.1.0
+# X-Env-Layer-Requires: rpi-boot-firmware,rpi-device-base
 # X-Env-Layer-Provides: openmux-serial
 #
 # METAEND
@@ -43,13 +45,38 @@
 #   openmux-serial-console.d/for/linux-base/cmdline.d/10-openmux-serial:
 #     -console=* +console=serial0,115200
 # (a fragment must be exactly ONE line).
-# `-console=*` strips EVERY console token the device defaults contribute - the
-# engine's family-base 00-defaults fragment is
+# `-console=*` is meant to strip EVERY console token another layer contributes
+# - the engine's family-base (layer name rpi-device-base) 00-defaults fragment
+# is
 #   console=serial0,115200 console=tty1 root=ROOTDEV fsck.repair=yes rootwait
-# - and replaces them with the one serial console, so the result is
-# deterministic and self-contained whatever the device layer provides. The
-# assembler dedupes exact tokens (keep-first), so no other fragment can sneak
-# a console back in.
+# - and replace them with the one serial console.
+#
+# PLAN ORDER IS THE WHOLE POINT, NOT THE CONTENTS OF THE FRAGMENT.
+# foreach_dropin() walks the layers IN PLAN ORDER (then file name), so which
+# fragment wins is decided by where the provider sits in layer.plan, not by the
+# file name or by what it removes. rpi-device-base pulls in rpi-boot-firmware
+# etc., which is why it lands AFTER a layer that only requires
+# rpi-boot-firmware - and a removal that runs before the tokens exist removes
+# nothing: the assembler appends family-base's console=tty1 afterwards (its
+# console=serial0,115200 was silently dropped as an exact duplicate, which is
+# precisely what made this look like "our fragment is being read": the serial
+# half appeared to work). Confirmed by the trace of work/bootstrap/layer.plan:
+#   openmux-serial-console 10-openmux-serial =>  console=serial0,115200
+#   rpi-device-base        00-defaults       =>  console=serial0,115200 console=tty1 root=ROOTDEV fsck.repair=yes rootwait
+#   image-rpios            50-root           =>  console=serial0,115200 console=tty1 fsck.repair=yes rootwait root=/dev/disk/by-slot/system
+# i.e. the shipped cmdline.txt was, and still is, the engine default with tty1
+# LAST (= /dev/console) - two earlier commits in this layer re-ordered /
+# removed console=tty1 inside this fragment and were complete no-ops.
+# `X-Env-Layer-Requires: rpi-device-base` (meta above) is therefore load
+#-bearing: it schedules this layer after the family defaults, so `-console=*`
+# really does remove them. Nothing else in the layer needs that layer, so the
+# dependency is purely an ordering constraint - keep it if you ever move this
+# fragment to another layer, or the console silently reverts.
+#
+# Re-verify without building: regenerate the plan with 'ig pipeline --plan-out'
+# from the config env ('ig config --write-to'), then apply every plan layer's
+# <stem>.d/for/linux-base/cmdline.d and <workdir>/for/linux-base/cmdline.d in
+# plan order. The result must contain exactly one console= token.
 #
 # WHY THERE IS NO console=tty1 (THE HDMI/VT CONSOLE). The kernel registers a
 # console for every console= token and printk copies to all of them, but the
@@ -62,11 +89,10 @@
 # vc4-kms-v3d first brings up a visible framebuffer, which is what made the
 # switch noticeable (and is very likely why an earlier revision of this layer
 # dropped console=tty1 in the first place).
-# Re-ordering tty1 to the front would fix /dev/console but keeps a second copy
-# of the boot log going to a port this appliance does not use for debugging;
-# with no console=tty1 at all there is no VT console for early userspace to
-# escape to, and the failure mode cannot come back. Only kernel/driver output
-# is lost on HDMI - nothing that used to be there was complete anyway.
+# A second copy of the boot log on a monitor buys nothing on an appliance whose
+# only debug channel is the UART, so tty1 is simply not contributed here - and
+# with no VT console token in play the failure mode cannot come back through a
+# later layer either.
 #
 # The UART routing lines live in config-append.txt (next to this file) and
 # are appended to the chroot's /boot/firmware/config.txt by the late hook
@@ -78,10 +104,9 @@
 # per-layer hooks get LAYER_DIR/LAYER_NAME/... . A late hook for the phase
 # runs after every layer's step hooks/overlays for that phase, so the append
 # lands after the rpi-boot-firmware template install; genimage then carries
-# the chroot's /boot/firmware/* into the boot vfat. This layer's
-# `X-Env-Layer-Requires: rpi-boot-firmware` (meta above) additionally orders
-# the layer after that install in the plan (harmless here, useful for any
-# future step-phase hook in the layer).
+# the chroot's /boot/firmware/* into the boot vfat. The requires in the meta
+# block (rpi-boot-firmware for the template, rpi-device-base for cmdline plan
+# order) additionally order this layer after both in the plan.
 #
 # There is deliberately NO getty unit: the console= entry makes systemd's
 # getty-generator bring up serial-getty@ttyAMA0 (a hand-enabled getty would

@@ -98,11 +98,14 @@ R="$V/root"
 # $V/boot. B points at that root.
 B="$V/boot"
 # The LAST console= token is the one that becomes /dev/console, and the
-# initramfs linuxrc plus PID 1 write only to /dev/console. Shipping
-# "console=serial0 console=tty1" sent early boot (and the login prompt) to HDMI
-# from the moment the initrd brought up a framebuffer, so the layer asserts
-# serial-only: exactly one console= token, and it is the UART. See the layer
-# header for the full reasoning.
+# initramfs linuxrc plus PID 1 write only to /dev/console. Shipping the engine
+# default "console=serial0 console=tty1" sent early boot (and the login prompt)
+# to HDMI from the moment the initrd brought up a framebuffer, so the layer
+# asserts serial-only: exactly one console= token, and it is the UART. The
+# token COUNT is the load-bearing assertion - the defaults reappear whenever
+# openmux-serial-console stops being planned after rpi-device-base (cmdline.d
+# fragments are applied in plan order), and they are invisible to a
+# "is console=serial0 present" check. See the layer header.
 chk       "cmdline.txt: serial console present"  "$B/cmdline.txt" 'console=serial0,115200'
 chk_not   "cmdline.txt: no console=tty1 (HDMI)"  "$B/cmdline.txt" 'console=tty1'
 [ "$(grep -Eo 'console=[^ ]+' "$B/cmdline.txt" | wc -l)" -eq 1 ] \
