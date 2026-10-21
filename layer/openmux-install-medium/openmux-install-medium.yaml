@@ -7,7 +7,7 @@
 # X-Env-Layer-Desc: auto-resize masks, and embedding the customer target
 # X-Env-Layer-Desc: image in /opt/openmux-installer/images. Applies to the
 # X-Env-Layer-Desc: USB install medium build only.
-# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Version: 1.1.0
 # X-Env-Layer-Requires:
 # X-Env-VarPrefix: om
 #
@@ -21,6 +21,8 @@
 # METAEND
 ---
 mmdebstrap:
+  packages:
+    - fdisk
   # The overlay dir (openmux-install-medium.d/overlay) is rsynced into the
   # chroot BEFORE the customize-hooks below run (see rpi-image-gen's
   # synth_layer_pre), so the hooks may rely on its content:
