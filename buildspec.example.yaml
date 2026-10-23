@@ -11,37 +11,88 @@
 #
 # Validation runs before anything is built (build/parse-buildspec.py);
 # errors point at the exact spec entry.
+#
+# `admin-user`, `users` and `post_install` are the COMPLETE set of top-level
+# keys - anything else is a parse error, on purpose: the spec provisions
+# accounts and nothing more. Hostname, WiFi, overlays, packages etc. are image
+# config (config/*.yaml, layer/), not build spec. Each setting below is
+# translated into an rpi-image-gen override (IGconf_device_user1*) or into a
+# generated customize hook; where it lands is noted per option.
 
 # --------------------------------------------------------------------------
 # admin-user: the primary account. Maps 1:1 onto rpi-image-gen's built-in
 # "user1" mechanism (nothing else is configurable for it).
+# Allowed keys: name, password, password_hash, sudo, uid, gid, groups, keys,
+# key_file. Every one of them is optional - with no admin-user section at all
+# you get `admin`, locked, no keys.
 # --------------------------------------------------------------------------
 admin-user:
-  # Account name (required; must not be 'openmux' or 'root').
+  # Account name (optional, default: admin). Lowercase, starts with a letter or
+  # '_', may contain 0-9 _ -. 'openmux' (reserved for a future system account)
+  # and 'root' are rejected for ANY account.
+  # -> IGconf_device_user1
   name: admin
 
   # Exactly ONE of `password` / `password_hash` / neither:
   #   password:      plaintext, checked against the generator's policy:
-  #                  >=8 chars incl. lower, upper, digit and one of @$!%*?&
-  #   password_hash: pre-hashed (e.g. `./build.sh --genpasswd '<pass>'`)
-  #   neither:       the account is LOCKED (no password login).
+  #                  >=8 chars incl. lower, upper, digit and one of @$!%*?&.
+  #                  The policy is a CLOSED character set: a space, a hyphen or
+  #                  a non-ASCII character is rejected even if the rest passes.
+  #                  It reaches the build in plaintext (work/buildspec/
+  #                  overrides.env, git-ignored) - prefer password_hash for a
+  #                  password that outlives the build.
+  #   password_hash: pre-hashed (e.g. `./build.sh --genpasswd '<pass>'`), fed
+  #                  to `chpasswd -e`, so any crypt() format the target accepts
+  #                  works ($y$ yescrypt, $6$ sha512-crypt, ...).
+  #   neither:       the account is created with --disabled-password and gets
+  #                  no chpasswd at all -> LOCKED for password login. SSH keys
+  #                  still work; the build prints a "primary account will be
+  #                  LOCKED" warning. With no keys either, nothing but an
+  #                  on-device password reset gets you in.
+  # -> IGconf_device_user1pass / IGconf_device_user1passhash
   password: "ChangeMe1!"
   # password_hash: "$6$..."
 
-  # sudo mode: none (default) | passwd (sudo asks for the password)
-  #            | nopasswd (sudo without a password)
+  # sudo mode: passwd (DEFAULT here) | none | nopasswd. What the image gets:
+  #   passwd:    /etc/sudoers.d/010_rpi-passwd  "<name> ALL=(ALL:ALL) ALL"
+  #              + member of `sudo`
+  #   nopasswd:  /etc/sudoers.d/010_rpi-nopasswd  "... NOPASSWD: ALL"
+  #              + member of `sudo`. Warns at build time if combined with no
+  #              password: nothing can authorise the NOPASSWD sudo.
+  #   none:      no sudoers entry, not in `sudo`.
+  # (Note this DEFAULT differs from `users:` below, which defaults to none.)
+  # -> IGconf_device_user1sudo
   sudo: passwd
 
-  # Identity (all optional). Defaults: uid/gid 1000, no extra groups.
+  # Identity (both optional, integers 1000-65533).
+  #   uid omitted -> adduser picks the first free uid (1000 on a fresh image).
+  #   gid omitted -> the user's own primary group, created by adduser.
+  #   gid given   -> primary group with that numeric id; if NO group has that
+  #                  gid, a group named after the user is created for it.
+  # Pin them only when something outside the image depends on the number (an
+  # NFS or AD share with fixed ids, say); otherwise leave both out.
+  # -> IGconf_device_user1uid / IGconf_device_user1gid
   uid: 1000
   gid: 1000
-  # Extra groups to join (created if absent), comma space list as YAML list:
+  # Extra groups to join: a YAML list (a single string also works). Names must
+  # be valid group names. Groups that do not exist yet are CREATED as system
+  # groups (groupadd -f -r) and the account is then added to them.
+  # -> IGconf_device_user1groups (comma separated)
   groups:
     - adm
 
   # SSH access - EITHER one or more inline keys (placeholder: REPLACE with
   # real public keys). Any number works: the builder writes them to a
   # temporary authorized_keys file and feeds that to the image build.
+  # Each line must be a real OpenSSH public key - "<type> <base64> [comment]"
+  # with type ssh-ed25519 / ssh-rsa / ecdsa-sha2-nistp{256,384,521} (or the
+  # sk- variants); the comment is free text. A private key (starts with
+  # "-----BEGIN") is rejected here, which is the point of the check.
+  # In the image all of them land in <home>/.ssh/authorized_keys (dir 0700,
+  # file 0600) - the file REPLACES that file, it does not append.
+  # NOTE: this account's keys are the ONLY SSH keys the built-in user1 gets;
+  # the root account has its password locked by the generator
+  # (`usermod --pass='*' root`), so a lost admin key means re-flashing.
   keys:
     - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyReplaceMe0000000000 admin@example"
     # - "ssh-ed25519 AAAA... admin@second-host"
@@ -49,6 +100,8 @@ admin-user:
   # keys live in a file rather than in the spec. `keys` and `key_file` are
   # mutually exclusive.
   # (path relative to this file's directory; the file must exist)
+  # Blank lines and whole-line '#' comments in the file are ignored, so it can
+  # be annotated. -> IGconf_ssh_pubkey_user1
   # key_file: keys/admin.pub
 
 # --------------------------------------------------------------------------
@@ -56,11 +109,30 @@ admin-user:
 # normal home directory + their own sudoers/keys. `uid`/`gid` are not
 # allowed here (the built-in user1 keeps 1000; additional accounts get
 # auto-assigned uids).
+#
+# Allowed keys per account: name (required), password, password_hash, sudo,
+# groups, keys, key_file. These are NOT passed to the generator: the builder
+# renders them into a customize hook (hooks/customize94-openmux-users,
+# generated - never edit it) that runs after the built-in user1 setup, so the
+# admin account above always exists first.
+#
+# What each one does in the image:
+#   name      created with `useradd -m -s /bin/sh`, so the SHELL IS /bin/sh
+#             (not bash) and the home comes from /etc/skel. Must be unique,
+#             including against admin-user.name.
+#   password  same policy as the admin account; XOR password_hash; neither =
+#             locked for password login (keys only).
+#   sudo      DEFAULT IS `none` here (the admin account defaults to passwd).
+#             passwd/nopasswd add the account to `sudo` AND write
+#             /etc/sudoers.d/openmux-<name> (mode 0440).
+#   groups    missing groups are created as system groups, then joined.
+#   keys      appended to /home/<name>/.ssh/authorized_keys (0700/0600, owned
+#             by the account). `key_file` works the same way as above.
 # --------------------------------------------------------------------------
 # users:
 #   - name: jdoe
 #     password: "ChangeMe2!"        # same policy as admin user's
-#     sudo: nopasswd                # none | passwd | nopasswd
+#     sudo: nopasswd                # none (default) | passwd | nopasswd
 #     groups: [adm]
 #     keys:                          # one or more inline keys
 #       - "ssh-ed25519 AAAA... jdoe@host"
@@ -82,5 +154,14 @@ admin-user:
 #   echo built-ok | chroot "$1" sh -c 'cat > /etc/openmux-marker'
 #
 # The script must be executable.
+#
+# Ordering / lifecycle: installed as hooks/customize95-openmux-postinstall, so
+# it runs after every layer hook and after the generated accounts hook
+# (customize94-openmux-users) - users, keys and sudoers are already in the
+# image when it starts - and before the root filesystem is packed into the
+# image. The file is copied in for the build and deleted afterwards, so it
+# lives only next to this spec; keep it in your own repo, not in the image.
+# Whatever it writes ends up in every unit built from this spec, so check the
+# result on the built image (verify/om-verify.sh) instead of assuming.
 # --------------------------------------------------------------------------
 # post_install: extras/post-install.sh
