@@ -150,6 +150,73 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 2. Re-run the verification checklist below before trusting the new ref.
 3. Update `ARG RPI_IMAGE_GEN_REF` in `Dockerfile` to make it permanent.
 
+## Factory and field-service tools
+
+`openmux-factory-tools` installs to `/opt/openmux-factory-tools` on **both**
+images: the install medium's menu drives the same files a technician uses by
+hand, so there is one behaviour to learn. Menu option 2 is a sub-menu
+(console serial, adapter serial, identify, test console, test adapter); the
+same steps exist as commands:
+
+Every FTDI part on this hardware is an FT4232H with the same `0403:6011`, and an
+unprogrammed chip reports **no serial at all**, so nothing here decides what a
+device is by its USB strings. Role comes from the topology:
+
+| what | serial | where it sits | ports |
+|---|---|---|---|
+| the console's own FTDI chips (permanently present) | `OMC000000-A`/`-B` | internal paths `2-1.1`, `2-1.2` | 8, flat: `/dev/openmux/port1..8` |
+| an EX-12 adapter (plug-in) | `OMX000000-A`/`-B`/`-C` | 3 chips behind the card's own hub, typically `2-1.4` → `.2/.3/.4` | 12, per card: `/dev/openmux/OMX000042/port1..12` |
+
+`OMC` is **OpenMux Console** (the chassis' own chips) and `OMX` is **OpenMux
+eXtention** (a card). The number is six digits by convention, not by rule:
+nothing in the tools, the udev rules or the boot script enforces a width, so a
+serial stamped with four digits is usable — merely unusual. Refusing one would
+make that chassis unprogrammable rather than merely odd.
+
+`99-openmux-ftdi.rules` (shipped by `openmux-hardware`) is what turns a serial
+into a port number: chip `A`→1-4, `B`→5-8, `C`→9-12, i.e.
+$port = 4 \times chip\_index + interface + 1$, and it splits the serial at its
+first dash, so **a serial base must never contain `-`**. The rules also accept a
+third console chip (`OMC…-C` → ports 9-12) even though this board fits two.
+
+A prefix is matched in **three places across two packages**, and they must move
+together: the rules above, `openmux-detect-hardware.sh` (which finds the console
+chip with a shell `case "$serial" in OMC*-A)`), and `PREFIX_*_DEFAULT` in
+`scan_ftdi.py`. Change one and nothing errors — the flash succeeds, the chip
+re-enumerates with a serial no rule claims, and the board simply has no
+`/dev/openmux` ports. `om-verify.sh` asserts the three agree.
+
+```
+scan-ftdi-adapters.py              # what is on the bus, which is console vs card, what is programmed
+  --serials                        # one programmed base per line + the ports it covers
+  --format tsv                     # machine-readable, what the menu parses
+  --snapshot f --diff-with f       # unplug/replug and it names the hub that changed
+  --check-base OMX000042           # would the rules match this? no hardware needed
+  --verify OMX000042               # numbering audit of a programmed card (see below)
+program-ftdi-internal.py OMC000001 # exactly the two console chips -> OMC000001-A/-B
+program-ftdi-external.py OMX000042 # all three chips of the one card on the bus (--adapter 2-1.4)
+run-board-tests.sh --port-base /dev/openmux/OMX000042 --pairs card
+```
+
+Write order after plugging in a virgin card, and why each step is there:
+
+```
+scan-ftdi-adapters.py                    # shows the hub and that the chips have no serial
+program-ftdi-external.py OMX000042  # prints the 3 chips and the console chips it will NOT touch
+#            ...then unplug the card and plug it back: the EEPROM is only read at plug-in
+scan-ftdi-adapters.py --verify OMX000042   # port numbers checked against sysfs, with no wiring at all
+run-board-tests.sh --port-base /dev/openmux/OMX000042 --pairs card
+```
+
+`run-board-tests.sh` prints the patch-cord plan **before** running anything, so
+the plugs go in from the same screen, and it runs the numbering audit first
+(`--no-audit` to skip). Pair profiles: `console` = 2-3, 4-5, 6-7, 8-1 and `card`
+= 2-3, 4-5, 6-7, 8-9, 10-11, 12-1 — both rings, both deliberately crossing the
+chip seams, because the seams are where a wrong numbering shows up.
+`--pairs 2:3,4:5` is accepted for a one-off; `legacy-console` reproduces the old
+1-2, 3-4, 5-6, 7-8. Every tool also takes `--devices-dir`/`--sys-tty-dir`, which
+is how the offline tests drive them against a fake sysfs tree with no hardware.
+
 ## Verification
 
 - **Unit (fast):** `python3 build/parse-buildspec.py <spec> <outdir>` —
@@ -218,6 +285,54 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 - **`/dev/serial0`.** Stock minbase has no udev rule for it;
   `openmux-hardware` ships `99-openmux-serial0.rules`
   (SYMLINK for `ttyAMA0`) because the factory menu references `/dev/serial0`.
+- **A loopback test cannot prove port numbering.** Pairwise loopback proves that
+  two names are wired together; it says nothing about whether the chip behind a
+  name is the one the name promises. Program chip `A` with `-B` and every port of
+  a card shifts by four: the ring still passes, and the port labelled 5 is
+  physically interface 0 of the chip the rules call `A`. That is why
+  `scan-ftdi-adapters.py --audit/--verify` exists, why it derives the expectation
+  from sysfs (which USB interface each `portN` symlink actually resolves to)
+  rather than from the serial, and why `run-board-tests.sh` runs it before asking
+  anyone to fit a plug. A numbering failure is reported as not a wiring fault.
+- **Console chips and adapter chips are told apart by path, never by content.**
+  Both are `0403:6011`, both take the same EEPROM format, and an unprogrammed chip
+  has no serial to filter on, so the only stable discriminator is where the chip
+  hangs: `2-1.1`/`2-1.2` are the console's, and an adapter's chips are the group
+  of more than one FTDI under a hub of its own. The guards are therefore
+  bidirectional and live in `scan_ftdi.py`, which the scanner, both flashers and
+  the runner all import: `program-ftdi-external.py` refuses a hub containing a
+  console chip, and `program-ftdi-internal.py` refuses a sibling FTDI that is not
+  one of the console's paths even when it is named explicitly on the command line
+  — the failure being guarded against is an operator pointing the console tool at
+  a card because the card was the only thing they could see. There is deliberately
+  no `--force` that bypasses this: `--internal PATHS` re-declares the paths, which
+  keeps the guard armed against whatever the new declaration says.
+- **Flashing an EEPROM re-enumerates the whole hub**, so a device list taken
+  before the first write is stale by the second write: bus number and devnum
+  change under you and `ftdi_eeprom` addresses a device by exactly those two.
+  Both flashers therefore re-scan, re-run the guards, re-check the serial they saw
+  at plan time and only then read bus/devnum, immediately before each invocation
+  (`reassert()`), and stop if the chip they are about to write is not the one they
+  described to the operator.
+- **`ftdi_eeprom` is not installed by either image.** The flashers detect it, say
+  which tool is missing and exit non-zero instead of half-running; the scanner,
+  the audit and the loopback tests do not need it. Adding it to
+  `openmux-factory-tools`' `Depends` needs the package name confirmed against the
+  pinned trixie mirror first — until then it is a deliberate gap, not an oversight.
+- **A serial prefix is matched in three places, shipped by two packages.**
+  `99-openmux-ftdi.rules` (as `OMC[0-9]*-A`), `openmux-detect-hardware.sh` (as a
+  shell `case` looking for `OMC*-A`) and `PREFIX_*_DEFAULT` in `scan_ftdi.py`.
+  They are not derived from each other and nothing errors when they disagree: the
+  flash succeeds, the chip re-enumerates with a serial no rule claims, and the
+  unit has no `/dev/openmux` ports at all - which looks like a dead card. The
+  prefix lives in a conffile, so `om-verify.sh` reads it back out of all three
+  shipped files and asserts they agree, rather than restating a literal.
+- **Menu structure is asserted, not assumed.** `om-verify.sh` pins the top-level
+  menu at its option count, and the serial sub-menu nests under option 2 for that
+  reason: adding a top-level entry means updating that pin. The sub-menu never
+  passes `--yes` to a flasher (the confirmation belongs to the operator) and never
+  runs a test after programming (the card has to be replugged first, so any port
+  it looked at would be the pre-flash one).
 - **The medium never uses the customer APT repo.** It is a fixed factory
   appliance; `openmux-repo` is only selected by the target, so the medium
   does not need a repo URI or GPG key (the repo layer is a clean no-op

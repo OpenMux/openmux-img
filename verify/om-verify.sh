@@ -187,6 +187,73 @@ chk   "extend-filesystem script installed" "$R/usr/local/sbin/openmux-extend-fil
 # packages (local debs from dist/pkgs via openmux-packages layer)
 [ -f "$R/var/lib/dpkg/info/openmux-hardware.list" ] && ok "deb openmux-hardware installed" || bad "openmux-hardware missing"
 [ -f "$R/var/lib/dpkg/info/openmux-factory-tools.list" ] && ok "deb openmux-factory-tools installed" || bad "openmux-factory-tools missing"
+# The FTDI tools are the field-service path onto every unit, and the field-service
+# story depends on one fact the console cannot be trusted to remember: the
+# console's own FTDI chips stay on the bus while a card is being programmed. Pin
+# the files, and run the shipped scanner here (it is pure stdlib, so the build
+# host's python3 executes it fine even though these are aarch64 roots) against a
+# tree that does not exist: it must answer, not crash and not need hardware.
+FT="$R/opt/openmux-factory-tools"
+for t in scan_ftdi.py scan-ftdi-adapters.py program-ftdi-internal.py \
+         program-ftdi-external.py run-board-tests.sh serial-test.py; do
+  [ -f "$FT/$t" ] && ok "factory tool $t" || bad "factory tool $t missing"
+done
+chk "scanner names the console guard"     "$FT/scan_ftdi.py" "console's own internal FTDI chip"
+chk "flasher refuses a card's own hub"    "$FT/scan_ftdi.py" "program-ftdi-external.py for a card"
+chk "audit derives ports from sysfs"      "$FT/scan_ftdi.py" "numbering_audit"
+chk "runner prints the plug plan"         "$FT/run-board-tests.sh" "Loopback connections required"
+chk "card profile crosses the chip seams" "$FT/run-board-tests.sh" "8:9,10:11,12:1"
+if python3 "$FT/scan-ftdi-adapters.py" --devices-dir /nonexistent \
+     --check-base OMX000042 >/dev/null 2>&1; then
+  ok "shipped scanner runs and accepts a base"
+else
+  bad "shipped scanner refused to run (--check-base OMX000042)"
+fi
+# A dash is the one character a base must not contain: the rules and the hardware
+# identity both split the serial at the first dash, so a base holding one makes
+# ports nothing can name. Cheaper to refuse at the keyboard than to explain later.
+if python3 "$FT/scan-ftdi-adapters.py" --devices-dir /nonexistent \
+     --check-base 'OMX-1' >/dev/null 2>&1; then
+  bad "scanner accepted a serial base containing a dash"
+else
+  ok "scanner refuses a dash in a serial base"
+fi
+# The serial prefix is MATCHED, not displayed, in three files that ship from two
+# packages: the udev rules and the boot-time identity script (openmux-hardware),
+# and the factory tools' default (openmux-factory-tools). They have to move in
+# step, and nothing fails if they do not: the flash reports success, the chip
+# re-enumerates with a serial no rule claims, and the unit simply has no
+# /dev/openmux ports forever - which reads as a dead card, not as a wrong file.
+# Each prefix is read out of the shipped file here, not repeated as a literal, so
+# a file that stops matching the documented shape reports "could not read" rather
+# than falsely confirming agreement.
+RU="$R/etc/udev/rules.d/99-openmux-ftdi.rules"
+HW="$R/usr/lib/openmux-hardware/openmux-detect-hardware.sh"
+# The role is the shape of the symlink: the console's ports are flat
+# (openmux/portN), a card's live in a folder named after its base (openmux/%c/...).
+# grep -E, not BRE sed: the serial pattern in the rules is a udev glob whose
+# literal "[0-9]*" BRE escaping gets wrong silently, and an empty result here is
+# the one outcome this check must never confuse with agreement. Verified against
+# the good file, the pre-migration file, a half-migrated file and /dev/null.
+prefix_of() { # <file> <symlink shape> -> the serial prefixes on matching rules
+  grep -E "$2" "$1" 2>/dev/null | grep -oE 'ATTRS\{serial\}=="[A-Z]+' | sed 's/.*"//' | sort -u
+}
+p_flat=$(prefix_of "$RU" 'SYMLINK\+="openmux/port[0-9]+"')
+p_fold=$(prefix_of "$RU" 'SYMLINK\+="openmux/%c/port[0-9]+"')
+p_hw=$(sed -n 's/^[[:space:]]*\([A-Z][A-Z]*\)\*-[AB]) found=.*/\1/p' "$HW" 2>/dev/null | sort -u)
+p_int=$(sed -n 's/^PREFIX_INTERNAL_DEFAULT = "\([A-Z]*\)".*/\1/p' "$FT/scan_ftdi.py" 2>/dev/null)
+p_ext=$(sed -n 's/^PREFIX_EXTERNAL_DEFAULT = "\([A-Z]*\)".*/\1/p' "$FT/scan_ftdi.py" 2>/dev/null)
+if [[ "$p_flat" =~ ^[A-Z]+$ ]] && [[ "$p_fold" =~ ^[A-Z]+$ ]] && [[ "$p_hw" == "$p_flat" ]] \
+   && [[ "$p_int" == "$p_flat" ]] && [[ "$p_ext" == "$p_fold" ]]; then
+  ok "serial prefixes agree: rules $p_flat/$p_fold, hardware script, tools default"
+else
+  bad "serial prefixes DISAGREE (flashing a chip would leave it with no ports)"
+  printf '        rules, ports flat  : [%s]\n' "${p_flat:-unreadable}" >&2
+  printf '        rules, per-card    : [%s]\n' "${p_fold:-unreadable}" >&2
+  printf '        detect-hardware    : [%s]\n' "${p_hw:-unreadable}" >&2
+  printf '        scan_ftdi internal : [%s]\n' "${p_int:-unreadable}" >&2
+  printf '        scan_ftdi external : [%s]\n' "${p_ext:-unreadable}" >&2
+fi
 [ -x "$R/usr/bin/curl" ] && ok "distro package curl" || bad "curl missing"
 [ -x "$R/usr/bin/git" ] && ok "distro package git" || bad "git missing"
 [ -L "$R/etc/systemd/system/sysinit.target.wants/openmux-detect-hardware.service" ] \
@@ -226,6 +293,27 @@ chk   "root .bash_profile execs the menu" "$M/root/.bash_profile" 'openmux-menu\
 chk     "menu is the boot-order sub-menu build"   "$M/usr/local/sbin/openmux-menu.sh" 'boot_order_menu\(\)'
 chk     "menu compares bootloader versions first" "$M/usr/local/sbin/openmux-menu.sh" 'eeprom_write_plan'
 chk_not "menu has no blind BOOT_ORDER rewrite"    "$M/usr/local/sbin/openmux-menu.sh" "sed -i 's/\\^BOOT_ORDER"
+# Menu 1.2.0 put the FTDI work behind one sub-menu instead of a single "set
+# internal serial" prompt, because the console's chips and a plug-in EX-12 share a
+# VID:PID and the menu must not be the thing that guesses. The top level is pinned
+# at eight options: the sub-menu nests under option 2 precisely so this number,
+# which the README and the bench instructions quote, does not move.
+chk     "menu 2 is the serial sub-menu"        "$M/usr/local/sbin/openmux-menu.sh" 'serial_menu\(\)'
+chk     "sub-menu can program a card"          "$M/usr/local/sbin/openmux-menu.sh" "Program an EX-12 adapter's serial number"
+chk     "sub-menu tests console and card apart" "$M/usr/local/sbin/openmux-menu.sh" "--pairs card"
+chk_not "menu never confirms a flash itself"   "$M/usr/local/sbin/openmux-menu.sh" 'program-ftdi[a-z-]*\.py.*--yes'
+n_opts=$(sed -n '/^main_menu()/,/^  done/p' "$M/usr/local/sbin/openmux-menu.sh" |
+         grep -cE '^  [0-9]\) ')
+[ "$n_opts" = "8" ] && ok "main menu has 8 top-level options" \
+  || bad "main menu has $n_opts top-level options, pinned at 8"
+# Option 2 is dead weight without the tools it shells out to; they ship in the
+# factory-tools deb, which the medium installs for exactly this reason.
+[ -r "$M/opt/openmux-factory-tools/scan-ftdi-adapters.py" ] \
+  && ok "medium ships the FTDI scanner (menu option 2)" \
+  || bad "medium is missing the FTDI scanner - menu option 2 cannot see the bus"
+[ -x "$M/opt/openmux-factory-tools/run-board-tests.sh" ] \
+  && ok "medium ships the board test runner" \
+  || bad "medium is missing run-board-tests.sh"
 [ -x "$M/usr/sbin/sfdisk" ] \
   && ok "sfdisk present (regenerate_disk_ids)" \
   || bad "sfdisk missing - installs would keep the source image PARTUUIDs"
