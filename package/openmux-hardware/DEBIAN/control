@@ -1,5 +1,5 @@
 Package: openmux-hardware
-Version: 1.0.0
+Version: 1.1.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
 Homepage: https://github.com/OpenMux
@@ -7,6 +7,8 @@ Section: misc
 Priority: optional
 Description: OpenMux hardware identity (internal FTDI console)
  Runtime service that records the identity (manufacturer/product/serial)
- of the console's internal FTDI chip (serial EEPROM matching OMH*-A) to
- /etc/openmux-hardware, plus udev symlinks /dev/openmux/<port> for the
- exposed console ports.
+ of the console's internal FTDI chip (serial EEPROM matching OMC*-A) to
+ /etc/openmux-hardware, plus udev symlinks /dev/openmux/port1-8 for the
+ exposed console ports. The OMC prefix is shared with 99-openmux-ftdi.rules
+ here and with the factory tools' defaults in openmux-factory-tools: it is
+ matched, not displayed, so all three have to move together.

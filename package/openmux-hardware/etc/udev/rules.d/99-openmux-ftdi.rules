@@ -1,22 +1,46 @@
 # /etc/udev/rules.d/99-openmux-ftdi.rules
-# One folder per board base serial:
-#   /dev/openmux/OMH1234/port1..8
-#   /dev/openmux/OMX5678/port1..12
+# Port names for the OpenMux FTDI chips, keyed off the programmed USB serial.
+#
+#   console chips   OMC<digits>-A/-B    ->  /dev/openmux/port1..8        (flat)
+#   adapter chips   OMX<digits>-A/-B/-C ->  /dev/openmux/<base>/port1..12
+#
+# Note the asymmetry: the console's ports are NOT in a folder of their own. Only
+# the OMX rules interpolate %c (the base serial, printed by the PROGRAM below);
+# the OMC rules link straight into /dev/openmux. The chip letter picks the block,
+# so port = 4*chip_index + interface + 1: A=1-4, B=5-8, C=9-12.
+#
+# The prefix is load-bearing in three places shipped by TWO packages, and they
+# must agree:
+#   * this file                                   (openmux-hardware)
+#   * openmux-detect-hardware.sh, which matches 'OMC*-A' in shell
+#                                                 (openmux-hardware)
+#   * PREFIX_INTERNAL_DEFAULT / PREFIX_EXTERNAL_DEFAULT in scan_ftdi.py
+#                                                 (openmux-factory-tools)
+# Change one without the others and the failure is silent in the worst way: the
+# flash succeeds, the chip re-enumerates with a serial no rule claims, the board
+# simply has no /dev/openmux ports, and the next person to touch it assumes the
+# card is dead. om-verify.sh asserts the three agree.
+#
+# A serial base must never contain a dash: both ${s%-A} here and ${s%%-*} in
+# openmux-detect-hardware.sh split at the FIRST dash.
+#
+# The OMC -C block (ports 9-12) is kept although this board fits two console
+# chips, so a carrier revision with a third needs no rule change.
 
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="00", ATTRS{serial}=="OMH[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port1"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="01", ATTRS{serial}=="OMH[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port2"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="02", ATTRS{serial}=="OMH[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port3"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="03", ATTRS{serial}=="OMH[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port4"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="00", ATTRS{serial}=="OMC[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port1"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="01", ATTRS{serial}=="OMC[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port2"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="02", ATTRS{serial}=="OMC[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port3"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="03", ATTRS{serial}=="OMC[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/port4"
 
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="00", ATTRS{serial}=="OMH[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port5"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="01", ATTRS{serial}=="OMH[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port6"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="02", ATTRS{serial}=="OMH[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port7"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="03", ATTRS{serial}=="OMH[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port8"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="00", ATTRS{serial}=="OMC[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port5"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="01", ATTRS{serial}=="OMC[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port6"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="02", ATTRS{serial}=="OMC[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port7"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="03", ATTRS{serial}=="OMC[0-9]*-B", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-B}'", SYMLINK+="openmux/port8"
 
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="00", ATTRS{serial}=="OMH[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port9"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="01", ATTRS{serial}=="OMH[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port10"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="02", ATTRS{serial}=="OMH[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port11"
-ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="03", ATTRS{serial}=="OMH[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port12"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="00", ATTRS{serial}=="OMC[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port9"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="01", ATTRS{serial}=="OMC[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port10"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="02", ATTRS{serial}=="OMC[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port11"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="03", ATTRS{serial}=="OMC[0-9]*-C", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-C}'", SYMLINK+="openmux/port12"
 
 ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="00", ATTRS{serial}=="OMX[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/%c/port1"
 ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ENV{ID_USB_INTERFACE_NUM}=="01", ATTRS{serial}=="OMX[0-9]*-A", PROGRAM="/bin/sh -c 's=%s{serial}; echo ${s%-A}'", SYMLINK+="openmux/%c/port2"
