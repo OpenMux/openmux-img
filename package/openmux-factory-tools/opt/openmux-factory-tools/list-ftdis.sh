@@ -1,2 +1,17 @@
-#!/bin/sh
-for d in /sys/bus/usb/devices/*; do   [ -f "$d/idVendor" ] || continue;   vid=$(cat "$d/idVendor" 2>/dev/null);   pid=$(cat "$d/idProduct" 2>/dev/null);   if [ "$vid:$pid" = "0403:6011" ]; then     p=$(basename "$d");     m=$(cat "$d/manufacturer" 2>/dev/null || echo "?");     pr=$(cat "$d/product" 2>/dev/null || echo "?");     s=$(cat "$d/serial" 2>/dev/null || echo "<none>");     b=$(cat "$d/busnum" 2>/dev/null); n=$(cat "$d/devnum" 2>/dev/null);     printf "%-8s busdev=%03d:%03d manufacturer='%s' product='%s' serial='%s'\n"       "$p" "$b" "$n" "$m" "$pr" "$s";   fi; done
+#!/usr/bin/env bash
+# list-ftdis.sh - a name people already know, now a wrapper.
+#
+# This used to be a flat dump of every 0403:6011 on the bus, which on a real
+# OpenMux is a misleading list: the console's own chips and a plugged-in EX-12
+# adapter are the same chip family, so their rows looked interchangeable, and a
+# role printed there would have been a guess read back out of a serial string -
+# the very thing a mis-aimed flash corrupts. The scanner groups by hub instead,
+# says why it called each row what it did, and keeps the console out of anything
+# offered as a programming target. Options: scan-ftdi-adapters.py --help
+#
+# Exit status differs from the old script on purpose: an empty bus is not an
+# error here (0), so a caller can tell "nothing plugged in" from "broken tool".
+set -uo pipefail
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$here/scan-ftdi-adapters.py" "$@"

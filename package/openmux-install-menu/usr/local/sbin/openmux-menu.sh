@@ -266,21 +266,266 @@ drop_to_shell() {
   bash -l || true
 }
 
-set_internal_serial() {
+# --- serial numbers and serial ports ------------------------------------------
+#
+# The console's own FTDI chips and a plug-in EX-12 adapter share one VID:PID, and
+# an unprogrammed adapter's chip reports no serial at all, so which is which can
+# only be read off the USB topology. That is scan-ftdi-adapters.py's job, and this
+# menu deliberately asks it rather than judging anything here: run-board-tests.sh
+# and program-ftdi-*.py use the same answers.
+#
+# Two rules through this whole section: the menu never passes --yes to a flasher
+# (the tool shows the chips and the old serials, and that confirmation is the
+# operator's, not the menu's), and programming is never chained into testing -
+# a flasher ends by asking for an unplug/replug, which has to happen before any
+# port means anything.
+
+FTDI_SCAN="$PROVISIONING_DIR/scan-ftdi-adapters.py"
+
+ftdi_tools_present() {
+  if [[ ! -r $FTDI_SCAN ]]; then
+    msg "Not found: $FTDI_SCAN"
+    msg "The openmux-factory-tools package provides it; option 1's image ships it."
+    return 1
+  fi
+  return 0
+}
+
+# Chatter from a function whose stdout is a return value has to go elsewhere.
+emsg() { echo -e "$*" >&2; }
+
+# One line per FTDI chip the scanner says belongs to an adapter group, in the
+# scanner's own tsv columns: role, path, hub, bus, devnum, serial, maker, product,
+# reason. The role is the scanner's judgement off the USB topology - this menu
+# never guesses it, and an unprogrammed chip has nothing here to guess from.
+ftdi_adapters() {
+  ftdi_tools_present || return 1
+  python3 "$FTDI_SCAN" --format tsv 2>/dev/null | awk -F'\t' '$1 == "adapter"'
+}
+
+# One line per adapter group, as "hub<TAB>bases": what to offer the operator,
+# collapsed from the three chips a card presents. bases is empty until the card
+# has been programmed, which is the state this whole section exists to handle.
+ftdi_adapter_summary() {
+  ftdi_adapters | awk -F'\t' '
+    {
+      hub = $3; base = $6; sub(/-[A-Za-z]$/, "", base)
+      if (!(hub in seen)) { seen[hub] = 1; order[++n] = hub }
+      if (base != "" && !((hub SUBSEP base) in have)) {
+        have[hub, base] = 1
+        list[hub] = list[hub] (list[hub] ? "," : "") base
+      }
+    }
+    END { for (i = 1; i <= n; i++) printf "%s\t%s\n", order[i], list[order[i]] }'
+}
+
+# The console's own chips, which the header shows so the operator can see the
+# tool is talking about the hardware they are looking at. Flat /dev/openmux, and
+# never offered as a card.
+ftdi_console_summary() {
+  ftdi_tools_present || return 1
+  python3 "$FTDI_SCAN" --format tsv --include-internal 2>/dev/null |
+    awk -F'\t' '$1 == "console" && $6 != "" { printf "%s ", $6 }' | sed 's/ *$//'
+}
+
+# Ask for a serial base, and refuse it here if the udev rules would not match it:
+# a base that is written but never matched leaves a programmed chip with no
+# /dev/openmux ports, which reads to the next person as a broken card. The rules
+# themselves live in scan_ftdi.validate_base and are reached through the scanner,
+# so the menu, the flashers and the tests cannot disagree about what is legal.
+#
+# Exit 3 from --check-base means "legal, but the rules will not name a folder for
+# it", which is not the same as a refusal: the operator may be working with a
+# prefix this stick's openmux.env does not know about, so it is asked explicitly
+# rather than accepted quietly or refused.
+ftdi_ask_base() {
+  local role=$1 prefix=$2 example base rc again
+  example="${prefix}1234"
+  while true; do
+    printf "Serial base, e.g. %s  ('q' cancels): " "$example" >&2
+    read -r base || return 1
+    [[ -z $base || $base == q || $base == Q ]] && return 1
+    ftdi_tools_present || return 1
+    python3 "$FTDI_SCAN" --check-base "$base" --for-role "$role"
+    rc=$?
+    if (( rc == 0 )); then
+      FTDI_BASE=$base
+      return 0
+    fi
+    if (( rc == 3 )); then
+      # Not read -rp: bash only shows that prompt when stdin is a terminal, and a
+      # question nobody saw asked is worse than no question.
+      printf 'Use it as typed anyway? [y/N]: ' >&2
+      read -r again || return 1
+      if [[ $again =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+        FTDI_BASE=$base
+        return 0
+      fi
+    fi
+    msg "Try again, or 'q' to cancel."
+  done
+}
+
+program_console_serial() {
   local script="$PROVISIONING_DIR/program-ftdi-internal.py"
-  if [[ ! -x "$script" ]]; then
-    msg "Provisioning script not found: $script"
+  if [[ ! -x $script ]]; then msg "Provisioning script not found: $script"; pause; return; fi
+  msg "The console's own two FTDI chips - the USB the host sees as a COM port, and"
+  msg "the debug serial. Their serials become OMC<digits>-A and -B, and the"
+  msg "ports land in flat /dev/openmux. The card's chips are refused by this tool."
+  msg ""
+  ftdi_ask_base internal OMC || return 0
+  msg ""
+  msg "If a card is plugged in, unplug it now: it must not be in the socket while"
+  msg "these are flashed, even though the tool will refuse it if it is."
+  msg ""
+  "$script" "$FTDI_BASE"
+  msg ""
+  msg "When it finishes, this console's ports reappear as /dev/openmux/port1-8."
+  msg "Test them from the serial menu."
+  pause
+}
+
+program_adapter_serial() {
+  local script="$PROVISIONING_DIR/program-ftdi-external.py" hub
+  if [[ ! -x $script ]]; then msg "Flashing script not found: $script"; pause; return; fi
+  if ! hub=$(ftdi_pick_adapter); then return 0; fi
+  ftdi_ask_base external OMX || return 0
+  msg ""
+  msg "The adapter stays in its socket for this. Its three chips are written"
+  msg "together as $FTDI_BASE-A, -B and -C, which is what numbers the twelve ports."
+  msg ""
+  "$script" "$FTDI_BASE" --adapter "$hub"
+  local rc=$?
+  (( rc == 0 )) && msg "Unplug the adapter, wait two seconds, plug it back, then" \
+                 && msg "test it from the serial menu."
+  pause
+}
+
+# Offer the adapter groups on the bus and echo the chosen hub. An adapter is
+# identified by where it is plugged in, because until it is programmed it has no
+# serial to name it by - and once it has, the socket still says which physical
+# card the operator is holding. Returns non-zero without choosing when there is
+# nothing to choose.
+ftdi_pick_adapter() {
+  local summary line hub bases n=0 hubs=() choice
+  summary=$(ftdi_adapter_summary)
+  if [[ -z $summary ]]; then
+    emsg "No EX-12 adapter found on USB."
+    emsg "If one is plugged in, list the FTDI devices from this menu: it shows what"
+    emsg "the bus does see, which is how a card that is unpowered, or on a hub that"
+    emsg "is not the card's own, becomes obvious."
+    pause
+    return 1
+  fi
+  while IFS=$'\t' read -r hub bases; do
+    [[ -n $hub ]] || continue
+    n=$((n + 1))
+    hubs+=("$hub")
+    emsg "  $n) USB path $hub  ${bases:+programmed as $bases}${bases:-not programmed yet}"
+  done <<<"$summary"
+  if (( n == 1 )); then
+    emsg "Only one adapter on the bus."
+    echo "${hubs[0]}"
+    return 0
+  fi
+  emsg ""
+  printf 'Which adapter? [1-%d] ' "$n" >&2
+  read -r choice || return 1
+  if ! [[ $choice =~ ^[0-9]+$ ]] || (( choice < 1 || choice > n )); then
+    emsg "Not one of those."
+    pause
+    return 1
+  fi
+  echo "${hubs[choice - 1]}"
+}
+
+list_ftdi_devices() {
+  ftdi_tools_present || { pause; return; }
+  python3 "$FTDI_SCAN" --serials
+  pause
+}
+
+test_console_ports() {
+  local script="$PROVISIONING_DIR/run-board-tests.sh"
+  if [[ ! -x $script ]]; then msg "Test runner not found: $script"; pause; return; fi
+  msg "Console ports are /dev/openmux/port1-8, flat. The runner prints the plug order"
+  msg "when it starts - 2-3, 4-5, 6-7, 8-1. Two of those four jump between the two"
+  msg "console chips (4-5 and 8-1), and those are the pairs that fail loudly when a"
+  msg "chip was programmed with the wrong serial."
+  msg ""
+  msg "It is safer to unplug any EX-12 adapter first, so there is nothing else"
+  msg "sharing those names while you are probing with a plug."
+  msg ""
+  pause
+  "$script" --port-base /dev/openmux --pairs console
+  pause
+}
+
+test_adapter_ports() {
+  local script="$PROVISIONING_DIR/run-board-tests.sh" hub bases base
+  if [[ ! -x $script ]]; then msg "Test runner not found: $script"; pause; return; fi
+  if ! hub=$(ftdi_pick_adapter); then return 0; fi
+  bases=$(ftdi_adapter_summary | awk -F'\t' -v h="$hub" '$1==h {print $2; exit}')
+  if [[ -z $bases ]]; then
+    msg "That adapter is not programmed yet, so it has no /dev/openmux folder to"
+    msg "test. Program it first - the twelve port numbers come from that serial."
     pause
     return
   fi
-
-  local base
-  read -rp "Enter internal serial base, e.g. OMH1234 -> OMH1234-A/B (or 'q' to cancel): " base
-  [[ "$base" == "q" ]] && return
-  [[ -n "$base" ]] || { msg "Serial base cannot be empty."; pause; return; }
-
-  "$script" "$base"
+  base=${bases%%,*}
+  msg "Testing /dev/openmux/$base. The runner prints the twelve-way patch cord"
+  msg "before it starts, including the 4-5, 8-9 and 12-1 joints between chips."
+  msg ""
+  "$script" --port-base "/dev/openmux/$base" --pairs card
   pause
+}
+
+serial_menu() {
+  local choice console adapters n
+  while true; do
+    clear
+    msg "========================================"
+    msg "   Serial numbers and serial ports"
+    msg "========================================"
+    ftdi_tools_present || { pause; return 0; }
+    console=$(ftdi_console_summary)
+    adapters=$(ftdi_adapter_summary)
+    n=$(grep -c . <<<"$adapters")
+    if [[ -n $console ]]; then
+      msg "  Console chips : $console   (/dev/openmux/port1-8, not offered as a card)"
+    else
+      msg "  Console chips : none seen on the internal paths. Either nothing is"
+      msg "                  programmed yet, or this board enumerates somewhere"
+      msg "                  other than 2-1.1/2-1.2 - list them and check before"
+      msg "                  programming anything."
+    fi
+    if (( n == 0 )); then
+      msg "  EX-12 cards   : none on the bus"
+    else
+      msg "  EX-12 cards   : $n"
+      while IFS=$'\t' read -r _ bases; do
+        msg "                  ${bases:+programmed as $bases}${bases:-present, not programmed}"
+      done <<<"$adapters"
+    fi
+    msg ""
+    msg "  1) Program the console's internal serial number"
+    msg "  2) Program an EX-12 adapter's serial number"
+    msg "  3) List / identify FTDI devices"
+    msg "  4) Test the console's ports (loopback)"
+    msg "  5) Test an EX-12 adapter's ports (loopback)"
+    msg "  6) Back"
+    msg "========================================"
+    read -rp "Select an option: " choice
+    case "$choice" in
+      1) program_console_serial ;;
+      2) program_adapter_serial ;;
+      3) list_ftdi_devices ;;
+      4) test_console_ports ;;
+      5) test_adapter_ports ;;
+      6) return 0 ;;
+      *) msg "Invalid option."; pause ;;
+    esac
+  done
 }
 
 # --- bootloader EEPROM / boot order -------------------------------------------
@@ -811,9 +1056,9 @@ main_menu() {
    OpenMux Console - Install Medium
 ========================================
   1) Install image to disk
-  2) Set internal serial number
+  2) Serial numbers and serial ports
   3) Boot order / bootloader EEPROM
-  4) Run board tests
+  4) Run board tests (console ports)
   5) Drop to shell
   6) Reboot
   7) Power off
@@ -824,7 +1069,7 @@ EOF
     read -rp "Select an option: " choice
     case "$choice" in
       1) do_install ;;
-      2) set_internal_serial ;;
+      2) serial_menu ;;
       3) boot_order_menu ;;
       4) run_board_tests ;;
       5) drop_to_shell ;;

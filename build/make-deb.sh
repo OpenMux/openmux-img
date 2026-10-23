@@ -34,6 +34,12 @@ for src in "$REPO_ROOT"/package/*/; do
     # bumping DEBIAN/control Version is not enough on its own.
     rm -f "$OUT/${name}_"*.deb
 
+    # dpkg-deb packs whatever is in the tree, and package/*/opt/openmux-factory-tools
+    # holds importable Python: running any of those tools by hand (or the offline
+    # test harnesses) leaves a __pycache__ behind. Prune it, so a shipped .deb
+    # never carries bytecode compiled by a different Python than the image's.
+    find "$tree" -name __pycache__ -type d -prune -exec rm -rf {} +
+
     dest="$OUT/${name}_${version}_${arch}.deb"
     echo ">> building $name $version ($arch)"
     dpkg-deb --build --root-owner-group -z9 --uniform-compression "$tree" "$dest"

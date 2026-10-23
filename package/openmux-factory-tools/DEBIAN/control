@@ -1,5 +1,5 @@
 Package: openmux-factory-tools
-Version: 1.0.0
+Version: 1.1.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
 Homepage: https://github.com/OpenMux
@@ -9,6 +9,15 @@ Depends: usbutils, python3-serial
 Description: OpenMux factory provisioning and test tools
  Standalone factory utilities for the OpenMux console: programming the
  internal/external FTDI EEPROM (manufacturer, product, serial base),
- listing detected FTDI consoles, a serial loopback test and the board
- test runner. Installed on the install medium (used from the factory
- menu) and on the target (kept for field service).
+ a topology scan that tells the console's own FTDI chips apart from a
+ plug-in EX-12 adapter by where each chip hangs on USB (they share one
+ VID:PID, and an unprogrammed chip has no serial to tell them apart
+ by), an audit that checks every /dev/openmux/portN against the
+ USB interface the udev rules promise it, a serial loopback test and
+ the board test runner. The flashers refuse the console's chips when
+ handed a card and refuse a card when handed the console, and re-read
+ each chip immediately before writing it because flashing re-numbers
+ the hub. Installed on the install medium (used from the factory
+ menu) and on the target (kept for field service). Flashing needs the
+ ftdi_eeprom binary, which this image does not ship; the tools report
+ that and stop rather than half-running.

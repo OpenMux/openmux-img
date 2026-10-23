@@ -1,5 +1,5 @@
 Package: openmux-install-menu
-Version: 1.1.0
+Version: 1.2.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
 Homepage: https://github.com/OpenMux
@@ -8,18 +8,20 @@ Priority: optional
 Depends: xz-utils, zstd, fdisk, rpi-eeprom
 Description: OpenMux install medium boot menu (neutral utility)
  Plain-text install/rescue menu for the OpenMux USB install medium: install a
- target image to disk, program the internal serial number, a boot-order and
- bootloader sub-menu that shows the current BOOT_ORDER and both bootloader
- versions before writing (and refuses downgrades, frozen modules and
- unverifiable writes), run board tests, drop to a shell, reboot/power off, and
- toggle the stick's overlay root filesystem.
+ target image to disk, a serial-number sub-menu for the console and for
+ plug-in EX-12 adapters (program, identify and test, with the console's own
+ FTDI chips held out of the way), a boot-order and bootloader sub-menu that
+ shows the current BOOT_ORDER and both bootloader versions before writing (and
+ refuses downgrades, frozen modules and unverifiable writes), run board tests,
+ drop to a shell, reboot/power off, and toggle the stick's overlay root
+ filesystem.
  .
  The menu is a neutral utility only; autologin, the root shell profile and any
- other factory boot behaviour are not part of this package - they are applied by
- the openmux-install-medium layer at build time.
+ other factory boot behaviour are not part of this package - they are applied
+ by the openmux-install-medium layer at build time.
  .
  Every Depends backs a feature that degrades to a warning when its tool is
- absent: xz-utils/zstd decompress the embedded images, fdisk provides the sfdisk
- regenerate_disk_ids() needs, and rpi-eeprom provides the rpi-eeprom-config /
- rpi-eeprom-update the boot-order sub-menu reads and writes the module
- bootloader with. They are declared rather than assumed.
+ absent: xz-utils/zstd decompress the embedded images, fdisk provides the
+ sfdisk regenerate_disk_ids() needs, and rpi-eeprom provides the
+ rpi-eeprom-config / rpi-eeprom-update the boot-order sub-menu reads and writes
+ the module bootloader with. They are declared rather than assumed.
