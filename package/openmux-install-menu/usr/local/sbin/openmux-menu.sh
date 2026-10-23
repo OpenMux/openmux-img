@@ -283,85 +283,451 @@ set_internal_serial() {
   pause
 }
 
-# BOOT_ORDER nibbles are tried lowest-to-highest significance: 4=USB-MSD, 6=NVME, 1=SD/eMMC, f=restart.
-set_boot_order_usb_first() {
-  if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
-    msg "rpi-eeprom-config not found; this device may not use an EEPROM bootloader."
-    pause
-    return
-  fi
+# --- bootloader EEPROM / boot order -------------------------------------------
+#
+# Everything in this section writes the module's SPI flash, which is the only
+# part of this menu that can turn a unit into a bench repair. Guarded as such.
+#
+# What "applying a config" actually does - checked against the rpi-eeprom
+# sources, and NOT what this option used to claim:
+#
+#   rpi-eeprom-config --apply <conf> does not patch the firmware that is
+#   running. It takes the NEWEST pieeprom-*.bin that the rpi-eeprom package on
+#   THIS STICK ships (apply_update() -> get_latest_eeprom() ->
+#   `rpi-eeprom-update -l`), replaces only the bootconf.txt inside it, and hands
+#   the result to `rpi-eeprom-update -d -i -f`. So one "boot order change" is
+#   simultaneously a bootloader VERSION change whenever the stick's image and
+#   the module's firmware differ - a real firmware upgrade/downgrade, not a
+#   config tweak. `-f` additionally BYPASSES the FREEZE_VERSION pin, and on
+#   BCM2712 the default path re-flashes the SPI flash immediately (A/B update),
+#   not at the next reboot.
+#
+# Upstream is not blind here either, and the guards below are deliberately
+# redundant with it (checked against /usr/bin/rpi-eeprom-update as built into
+# the medium, and /usr/bin/rpi-eeprom-config):
+#
+#   * applyRecoveryUpdate() compares the IMAGE's MFG_VER with
+#     /proc/device-tree/chosen/rpi-min-boot-ver and dies when
+#     STRICT_MIN_VER_CHECK=1 (the default) - a module manufactured with a newer
+#     bootloader than this stick ships is refused there. That is the
+#     "module boot key/ver is too old for the image" case, and it is covered.
+#   * confirmDowngrade() covers the other direction: an image older than the
+#     running bootloader - or a running version it cannot read - is refused
+#     unless -y / RPI_EEPROM_ALLOW_DOWNGRADE=1, and --apply passes -d -i -f
+#     only, never -y.
+#   * the image -l picks is filtered by EEPROM size and BCM chip
+#     (FIRMWARE_ROOT-$BCM_CHIP/<release-status>), so a BCM2711 image cannot be
+#     selected on a BCM2712 module.
+#
+# What upstream does NOT cover, and is therefore ours: -f ignores the
+# FREEZE_VERSION pin; an UPGRADE to a release nobody validated for this module's
+# boot flow is entirely acceptable to upstream; and upstream's downgrade prompt
+# is written to /dev/tty from inside rpi-eeprom-config, i.e. a question asked
+# where nobody saw it being asked. So this menu shows the current order and both
+# versions before anything else, refuses a downgrade or an unchecked write,
+# requires a second distinct word whenever the firmware version moves, honours
+# FREEZE_VERSION, and never writes back a config it could not fully read.
 
-  local tmp_conf
-  tmp_conf="$(mktemp)"
-  rpi-eeprom-config > "$tmp_conf" 2>/dev/null
-
-  if grep -q '^BOOT_ORDER=' "$tmp_conf"; then
-    sed -i 's/^BOOT_ORDER=.*/BOOT_ORDER=0xf164/' "$tmp_conf"
-  else
-    echo "BOOT_ORDER=0xf164" >> "$tmp_conf"
-  fi
-
-  msg ""
-  msg "This sets BOOT_ORDER=0xf164: USB first, then NVMe, then eMMC/SD, then repeat."
-  msg "The bootloader EEPROM is updated; the new order takes effect after a reboot."
-  local confirm
-  read -rp "Type YES (uppercase) to apply, or anything else to cancel: " confirm
-  if [[ "$confirm" != "YES" ]]; then
-    msg "Aborted."
-    rm -f "$tmp_conf"
-    pause
-    return
-  fi
-
-  if rpi-eeprom-config --apply "$tmp_conf"; then
-    msg "Boot order update scheduled. Reboot for it to take effect."
-  else
-    msg "Failed to apply boot order change."
-  fi
-  rm -f "$tmp_conf"
-  pause
+# BOOT_ORDER nibble -> mode name (Raspberry Pi bootloader configuration).
+# Unknown nibbles are echoed rather than guessed at.
+boot_mode_name() {
+  case "$1" in
+    0) echo "SD-DETECT(deprecated)" ;;
+    1) echo "SD/eMMC" ;;
+    2) echo "NETWORK" ;;
+    3) echo "RPIBOOT" ;;
+    4) echo "USB-MSD" ;;
+    5) echo "BCM-USB-MSD" ;;
+    6) echo "NVME" ;;
+    7) echo "HTTP" ;;
+    e) echo "STOP" ;;
+    f) echo "RESTART" ;;
+    *) echo "mode:$1" ;;
+  esac
 }
 
-# Dropping the BOOT_ORDER override lets the bootloader fall back to its stock firmware default.
-restore_boot_order_default() {
+# Renders a BOOT_ORDER value the way the bootloader reads it: one boot mode per
+# nibble, LEAST significant nibble first, leading zero nibbles being padding
+# rather than mode 0. An operator must be able to see "USB-MSD -> NVME -> ..."
+# before agreeing to overwrite it, not have to decode 0xf164 by hand.
+describe_boot_order() {
+  local raw="$1" seq="" c i
+  [[ "$raw" =~ ^0[xX][0-9a-fA-F]+$ ]] || { printf '%s' "$raw"; return 0; }
+  raw="$(printf '%s' "${raw#0[xX]}" | tr 'A-F' 'a-f')"
+  while [[ "$raw" == 0* && ${#raw} -gt 1 ]]; do raw="${raw#0}"; done
+  for (( i = ${#raw} - 1; i >= 0; i-- )); do
+    c="${raw:i:1}"
+    [[ -n "$seq" ]] && seq+=" -> "
+    seq+="$(boot_mode_name "$c")"
+  done
+  printf '%s' "$seq"
+  return 0
+}
+
+# The module's current bootloader configuration, or nothing plus a reason on
+# stderr. Every caller decides WRITE / NO WRITE from this output, so a missing
+# tool has to be distinguishable from an empty config and must never be treated
+# as "no BOOT_ORDER set".
+read_eeprom_config() {
   if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
-    msg "rpi-eeprom-config not found; this device may not use an EEPROM bootloader."
-    pause
-    return
+    echo "rpi-eeprom-config is not installed on this medium (package rpi-eeprom)." >&2
+    return 1
+  fi
+  local out
+  # stderr deliberately NOT redirected: when this fails, upstream's own reason
+  # ("ERROR: ...vcgencmd bootloader_config..." / a missing blconfig nvmem node)
+  # is the diagnosis, and it is the only thing the operator will see.
+  out="$(rpi-eeprom-config)" || return 1
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
+
+# Every BOOT_ORDER assignment together with the section it lives in, as
+# "section|value". BOOT_ORDER is legal in conditional sections too, so "the"
+# boot order is not necessarily one line and pretending otherwise would let the
+# menu report an order the module does not actually follow.
+conf_boot_order_lines() {
+  awk '
+    function strip(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    /^[[:space:]]*\[/ { sec = strip($0); next }
+    /^[[:space:]]*BOOT_ORDER[[:space:]]*=/ {
+      v = $0
+      sub(/^[[:space:]]*BOOT_ORDER[[:space:]]*=[[:space:]]*/, "", v)
+      printf "%s|%s\n", (sec == "" ? "[all]" : sec), strip(v)
+    }
+  '
+}
+
+# BOOT_ORDER in the default (pre-section / [all]) section only; empty if unset.
+conf_default_boot_order() {
+  awk '
+    function strip(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    BEGIN { inall = 1 }
+    /^[[:space:]]*\[/ { inall = (strip($0) == "[all]"); next }
+    inall && /^[[:space:]]*BOOT_ORDER[[:space:]]*=/ {
+      v = $0
+      sub(/^[[:space:]]*BOOT_ORDER[[:space:]]*=[[:space:]]*/, "", v)
+      print strip(v); exit
+    }
+  '
+}
+
+# Replaces BOOT_ORDER in the default section, inserting it there if absent.
+# Conditional sections are copied through verbatim: silently rewriting a
+# [gpio8=0]-style override (which a plain sed/sed-i would do) is exactly the
+# surprise this menu must not produce. Usage: <value> [conf-file, default stdin]
+conf_set_boot_order() {
+  awk -v new="BOOT_ORDER=$1" '
+    function strip(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    BEGIN { inall = 1 }
+    /^[[:space:]]*\[/ {
+      if (strip($0) == "[all]") { inall = 1 } else {
+        if (!done && inall) { print new; done = 1 }
+        inall = 0
+      }
+      print; next
+    }
+    !done && inall && /^[[:space:]]*BOOT_ORDER[[:space:]]*=/ { print new; done = 1; next }
+    { print }
+    END { if (!done && inall) print new }
+  ' "${2:--}"
+}
+
+# As conf_set_boot_order, but removes the default-section assignment so the
+# bootloader falls back to its built-in order.
+conf_drop_boot_order() {
+  awk '
+    function strip(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    BEGIN { inall = 1 }
+    /^[[:space:]]*\[/ { inall = (strip($0) == "[all]"); print; next }
+    inall && /^[[:space:]]*BOOT_ORDER[[:space:]]*=/ { next }
+    { print }
+  ' "${1:--}"
+}
+
+# Build timestamp (epoch seconds) of the RUNNING bootloader, from the same two
+# sources rpi-eeprom-update uses: device-tree first, vcgencmd as the fallback.
+running_bootloader_ts() {
+  local f=/proc/device-tree/chosen/bootloader/build-timestamp hex ts line
+  if [[ -r "$f" ]]; then
+    hex="$(od -An -tx1 -v "$f" 2>/dev/null | tr -d ' \n')"
+    if [[ "$hex" =~ ^[0-9a-fA-F]+$ ]]; then printf '%s' "$((16#$hex))"; return 0; fi
+  fi
+  command -v vcgencmd >/dev/null 2>&1 || return 1
+  line="$(vcgencmd bootloader_version 2>/dev/null)" || return 1
+  ts="$(awk '/timestamp/ { print $2; exit }' <<<"$line")"
+  if [[ "$ts" =~ ^[0-9]+$ ]]; then printf '%s' "$ts"; return 0; fi
+  ts="$(date -u -d "$(head -n1 <<<"$line")" +%s 2>/dev/null)"
+  if [[ "$ts" =~ ^[0-9]+$ ]]; then printf '%s' "$ts"; return 0; fi
+  return 1
+}
+
+# The newest image the rpi-eeprom package on this stick offers - i.e. exactly
+# the image --apply would write. Empty when the package ships none.
+target_bootloader_image() { rpi-eeprom-update -l 2>/dev/null | tail -n1; }
+
+# Timestamp baked into an EEPROM image (the value rpi-eeprom-update compares
+# against the running one). Read with grep -a rather than strings, which is not
+# guaranteed to be installed here.
+image_bootloader_ts() {
+  local img="$1" ts
+  [[ -n "$img" && -r "$img" ]] || return 1
+  ts="$(grep -aom1 -E 'BUILD_TIMESTAMP=[0-9]+' "$img" 2>/dev/null)"
+  ts="${ts#BUILD_TIMESTAMP=}"
+  if [[ "$ts" =~ ^[0-9]+$ ]]; then printf '%s' "$ts"; return 0; fi
+  return 1
+}
+
+ts_to_date() {
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then date -u -d "@$1" +%F 2>/dev/null && return 0; fi
+  printf 'unknown'
+}
+
+# Classifies what a write would do to the bootloader VERSION, independent of the
+# config change. Prints "plan|running_ts|image_ts|image_path" with plan one of
+# same | upgrade | downgrade | unknown.
+eeprom_write_plan() {
+  local cur img image plan
+  cur="$(running_bootloader_ts || true)"
+  image="$(target_bootloader_image)"
+  img="$(image_bootloader_ts "${image:-}" || true)"
+  if [[ -z "$cur" || -z "$img" ]]; then plan=unknown
+  elif (( img > cur )); then plan=upgrade
+  elif (( img < cur )); then plan=downgrade
+  else plan=same
+  fi
+  printf '%s|%s|%s|%s\n' "$plan" "${cur:-}" "${img:-}" "${image:-}"
+}
+
+# The state that has to be on screen BEFORE anyone may decide: what the module
+# boots from now, what firmware is running, and what writing would replace it
+# with. Reprinted on every sub-menu redraw, so the operator also sees the effect
+# of the change they just made.
+show_eeprom_status() {
+  local conf found=0 sec val plan cur_ts img_ts image cur_date img_date img_name
+  conf="$(read_eeprom_config)" || conf=""
+  if [[ -z "$conf" ]]; then
+    msg "  No bootloader configuration available - see the reason above."
+    msg "  Nothing can be changed until that works."
+    return 1
   fi
 
-  local tmp_conf
-  tmp_conf="$(mktemp)"
-  rpi-eeprom-config > "$tmp_conf" 2>/dev/null
+  while IFS='|' read -r sec val; do
+    [[ -n "${sec:-}" ]] || continue
+    found=1
+    if [[ "$sec" == "[all]" ]]; then
+      msg "  Boot order [all]:  $val  ->  $(describe_boot_order "$val")"
+    else
+      msg "  Boot order $sec:  $val  ->  $(describe_boot_order "$val")"
+    fi
+  done < <(printf '%s\n' "$conf" | conf_boot_order_lines)
+  (( found )) || msg "  Boot order:        not set -> the ROM's built-in order (0xf41, no NVMe)"
 
-  if ! grep -q '^BOOT_ORDER=' "$tmp_conf"; then
-    msg "No BOOT_ORDER override is set; this board is already using the stock default."
-    rm -f "$tmp_conf"
-    pause
-    return
+  IFS='|' read -r plan cur_ts img_ts image < <(eeprom_write_plan)
+  cur_date="$(ts_to_date "${cur_ts:-}")"
+  img_date="$(ts_to_date "${img_ts:-}")"
+  img_name="none"
+  [[ -n "$image" ]] && img_name="$(basename "$image")"
+  msg "  Bootloader running:  $cur_date"
+  msg "  Image on this stick: $img_date  ($img_name)"
+  case "$plan" in
+    same)
+      msg "  => a write changes the BOOT ORDER ONLY (identical bootloader version)." ;;
+    upgrade)
+      msg "  => a write ALSO UPGRADES the bootloader $cur_date -> $img_date." ;;
+    downgrade)
+      msg "  => a write would DOWNGRADE the bootloader - refused by this menu." ;;
+    *)
+      msg "  => versions not comparable - writes refused by this menu." ;;
+  esac
+
+  if grep -qiE '^[[:space:]]*FREEZE_VERSION[[:space:]]*=[[:space:]]*1' <<<"$conf"; then
+    msg "  NOTE: FREEZE_VERSION=1 - this module's bootloader is pinned. Refused below."
   fi
+  if [[ -e /boot/firmware/pieeprom.upd ]]; then
+    msg "  NOTE: a bootloader update is STAGED in /boot/firmware and will be"
+    msg "        applied by the next reboot (cancel: rpi-eeprom-update -r)."
+  fi
+  return 0
+}
 
-  sed -i '/^BOOT_ORDER=/d' "$tmp_conf"
+# The single write path. Refuses more than it accepts, because a bad EEPROM word
+# is not recoverable from this menu. Usage: <orig conf> <new conf file>
+apply_eeprom_conf() {
+  local conf="$1" new_conf="$2"
+  local plan cur_ts img_ts image word confirm cur_date img_date
+
+  IFS='|' read -r plan cur_ts img_ts image < <(eeprom_write_plan)
+  cur_date="$(ts_to_date "${cur_ts:-}")"
+  img_date="$(ts_to_date "${img_ts:-}")"
+  case "$plan" in
+    same) word="YES" ;;
+    upgrade) word="UPGRADE" ;;
+    downgrade)
+      msg ""
+      msg "REFUSED: the bootloader image on this stick ($img_date) is OLDER than the"
+      msg "one running in this module ($cur_date), so applying a config here would"
+      msg "downgrade the bootloader. rpi-eeprom-update would also stop on this"
+      msg "(confirmDowngrade refuses without -y), but it asks on /dev/tty from inside"
+      msg "rpi-eeprom-config, so stop it here instead. Refresh the install image's"
+      msg "rpi-eeprom package (or apt upgrade rpi-eeprom on the stick) instead."
+      return 1
+      ;;
+    *)
+      msg ""
+      msg "REFUSED: either the running bootloader version or the version of the image"
+      msg "this stick would write cannot be determined, so the write cannot be checked."
+      msg "With an unreadable running version rpi-eeprom-update treats the write as a"
+      msg "possible downgrade and refuses it for the same reason (no -y is passed)."
+      return 1
+      ;;
+  esac
+
+  if grep -qiE '^[[:space:]]*FREEZE_VERSION[[:space:]]*=[[:space:]]*1' <<<"$conf"; then
+    msg ""
+    msg "REFUSED: FREEZE_VERSION=1 - this module's bootloader is deliberately pinned."
+    msg "rpi-eeprom-config --apply bypasses that flag, so it is honoured here instead."
+    msg "Unpinning a module is a maintenance decision, not a side effect of setting a"
+    msg "boot order. See 'rpi-eeprom-update -r' / the bootloader recovery flow."
+    return 1
+  fi
 
   msg ""
-  msg "This removes the BOOT_ORDER override so the bootloader falls back to its stock default."
-  msg "The bootloader EEPROM is updated; the change takes effect after a reboot."
-  local confirm
-  read -rp "Type YES (uppercase) to apply, or anything else to cancel: " confirm
-  if [[ "$confirm" != "YES" ]]; then
+  msg "Writes:  $(basename "${image:-<no image>}") - bootloader $img_date"
+  msg "         into the module's SPI flash. The new order takes effect on the next boot."
+  if [[ "$plan" == "same" ]]; then
+    msg "         Bootloader version UNCHANGED ($cur_date): this replaces only the"
+    msg "         configuration inside the firmware release already running here."
+  fi
+  msg "On CM5 this is normally an IMMEDIATE A/B re-flash taking up to a minute:"
+  msg "*** do NOT remove power while it runs. ***"
+  if [[ "$word" == "UPGRADE" ]]; then
+    msg ""
+    msg "This is NOT just a boot-order change. It also replaces the bootloader firmware"
+    msg "$cur_date -> $img_date. Upstream checks that release's manufacture version"
+    msg "(MFG_VER) against this module and stops if it is too old, but nothing here has"
+    msg "validated the release itself for this product's boot flow."
+  fi
+  # The required word is echoed as a message and not only as the read prompt:
+  # bash prints a `read -p` prompt only when stdin is a terminal, so over ssh -
+  # or in a test - the operator would be asked to type something they cannot see.
+  msg ""
+  msg "Type $word (uppercase) to apply, anything else cancels."
+  read -rp "Confirm: " confirm
+  if [[ "$confirm" != "$word" ]]; then
     msg "Aborted."
-    rm -f "$tmp_conf"
-    pause
-    return
+    return 1
   fi
 
-  if rpi-eeprom-config --apply "$tmp_conf"; then
-    msg "Default boot order restored. Reboot for it to take effect."
-  else
-    msg "Failed to restore default boot order."
+  if rpi-eeprom-config --apply "$new_conf"; then
+    msg ""
+    msg "Applied. Verify after the next reboot with:  rpi-eeprom-config | grep BOOT_ORDER"
+    return 0
   fi
-  rm -f "$tmp_conf"
-  pause
+  msg ""
+  msg "rpi-eeprom-config --apply FAILED - see its output above; nothing was changed"
+  msg "unless it reported an immediate update, in which case treat the module as QC."
+  return 1
+}
+
+# Renders current vs. new order, then writes. Empty <value> drops the override
+# so the bootloader uses its built-in order.
+eeprom_change_boot_order() {
+  local value="${1:-}" meaning="${2:-}"
+  local conf n cur outside tmp rc
+
+  conf="$(read_eeprom_config)" || conf=""
+  if [[ -z "$conf" ]]; then
+    msg "Could not read the bootloader configuration; nothing written."
+    return 1
+  fi
+
+  # A short read means the config never really came back (no root, no vcgencmd,
+  # no blconfig nvmem). Writing it back would blank the module's EEPROM config
+  # - rpi-eeprom-update refuses to propagate such configs for the same reason.
+  n="$(printf '%s\n' "$conf" | grep -c .)"
+  if (( n < 3 )); then
+    msg "REFUSED: the bootloader config read back as $n line(s); writing that back would"
+    msg "blank the module's EEPROM configuration."
+    return 1
+  fi
+
+  cur="$(printf '%s\n' "$conf" | conf_default_boot_order)"
+  outside="$(printf '%s\n' "$conf" | conf_boot_order_lines | awk -F'|' '$1 != "[all]" { printf "%s=%s ", $1, $2 }')"
+
+  msg ""
+  if [[ -n "$outside" ]]; then
+    msg "NOTE: BOOT_ORDER is also set outside [all] ($outside). Those lines are left"
+    msg "untouched - the change below only concerns the default section."
+  fi
+  [[ -n "$meaning" ]] && msg "$meaning"
+
+  tmp="$(mktemp)"
+  if [[ -n "$value" ]]; then
+    if [[ -n "$cur" && "${cur,,}" == "${value,,}" ]]; then
+      msg "Boot order is already $value - no EEPROM write needed."
+      rm -f "$tmp"
+      return 0
+    fi
+    if [[ -n "$cur" ]]; then
+      msg "Current boot order:  $cur  ->  $(describe_boot_order "$cur")"
+    else
+      msg "Current boot order:  not set in [all] -> the ROM's built-in order"
+    fi
+    msg "New boot order:      $value  ->  $(describe_boot_order "$value")"
+    printf '%s\n' "$conf" | conf_set_boot_order "$value" > "$tmp"
+  else
+    if [[ -z "$cur" ]]; then
+      msg "No BOOT_ORDER in the default section - the ROM built-in order already applies."
+      rm -f "$tmp"
+      return 0
+    fi
+    msg "Current boot order:  $cur  ->  $(describe_boot_order "$cur")"
+    msg "New boot order:      unset -> the ROM's built-in order, documented as 0xf41"
+    msg "                     (SD/eMMC, then USB-MSD, then repeat): NO NVMe entry, so"
+    msg "                     this is NOT the same as the 0xf461 platform default."
+    printf '%s\n' "$conf" | conf_drop_boot_order > "$tmp"
+  fi
+
+  apply_eeprom_conf "$conf" "$tmp"
+  rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+# Options 3 and 4 of the main menu used to be two blind writes; they are one
+# sub-menu now so the current order is always visible when choosing between them.
+boot_order_menu() {
+  local choice
+  while true; do
+    clear
+    msg "========================================"
+    msg "     Bootloader EEPROM / boot order"
+    msg "========================================"
+    if ! show_eeprom_status; then pause; continue; fi
+    msg "----------------------------------------"
+    msg "  1) 0xf164 USB, NVMe, eMMC      (USB priority)"
+    msg "  2) 0xf461 eMMC, NVMe, USB      (eMMC with NVMe)"
+    msg "  3) 0xf14  USB, eMMC            (USB priority, no NVMe)"
+    msg "  4) unset  eMMC, USB            (ROM default, removes BOOT_ORDER)"
+    msg "  5) Show the full EEPROM config"
+    msg "  6) Back"
+    msg "========================================"
+    read -rp "Select an option: " choice
+    case "$choice" in
+      1) eeprom_change_boot_order 0xf164 "USB priority: the USB stick if present, then NVMe, then eMMC."
+         pause ;;
+      2) eeprom_change_boot_order 0xf461 "Platform default: eMMC first, NVMe next, USB only as fallback."
+         pause ;;
+      3) eeprom_change_boot_order 0xf14 "USB priority without the NVMe step: the USB stick if present, then eMMC."
+         pause ;;
+      4) eeprom_change_boot_order ""
+         pause ;;
+      5) msg ""; read_eeprom_config || msg "(no config)"; pause ;;
+      6) return 0 ;;
+      *) msg "Invalid option."; pause ;;
+    esac
+  done
 }
 
 run_board_tests() {
@@ -446,13 +812,12 @@ main_menu() {
 ========================================
   1) Install image to disk
   2) Set internal serial number
-  3) Set boot order (USB first)
-  4) Restore default boot order
-  5) Run board tests
-  6) Drop to shell
-  7) Reboot
-  8) Power off
-  9) Toggle read-only overlay filesystem (currently: $(overlayfs_status))
+  3) Boot order / bootloader EEPROM
+  4) Run board tests
+  5) Drop to shell
+  6) Reboot
+  7) Power off
+  8) Toggle read-only overlay filesystem (currently: $(overlayfs_status))
 ========================================
 EOF
     local choice
@@ -460,13 +825,12 @@ EOF
     case "$choice" in
       1) do_install ;;
       2) set_internal_serial ;;
-      3) set_boot_order_usb_first ;;
-      4) restore_boot_order_default ;;
-      5) run_board_tests ;;
-      6) drop_to_shell ;;
-      7) reboot ;;
-      8) poweroff ;;
-      9) toggle_overlayfs ;;
+      3) boot_order_menu ;;
+      4) run_board_tests ;;
+      5) drop_to_shell ;;
+      6) reboot ;;
+      7) poweroff ;;
+      8) toggle_overlayfs ;;
       *) msg "Invalid option."; pause ;;
     esac
   done

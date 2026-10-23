@@ -27,6 +27,13 @@ for src in "$REPO_ROOT"/package/*/; do
     arch="$(sed -n 's/^Architecture:[[:space:]]*//p' "$tree/DEBIAN/control" | head -n1)"
     [ -n "$version" ] && [ -n "$arch" ] || { echo "ERROR: $tree DEBIAN/control missing Version/Architecture" >&2; exit 1; }
 
+    # Remove any earlier build of this package first: the openmux-install-medium
+    # layer installs "dist/pkgs/openmux-install-menu_*.deb" by GLOB, so a stale
+    # second version in $OUT ends up in the same apt-get invocation as the new
+    # one. $OUT also survives rebuilds (it is a bind mount from the host), so
+    # bumping DEBIAN/control Version is not enough on its own.
+    rm -f "$OUT/${name}_"*.deb
+
     dest="$OUT/${name}_${version}_${arch}.deb"
     echo ">> building $name $version ($arch)"
     dpkg-deb --build --root-owner-group -z9 --uniform-compression "$tree" "$dest"

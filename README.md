@@ -10,7 +10,7 @@ One entry point — `./build.sh` — produces **two** images:
 | Image | Name | What it is |
 |---|---|---|
 | Target | `openmux-cm5.img` | The installable device image. Accounts, APT repo and packages come from the customer **build spec**. |
-| Install medium | `openmux-install-medium-cm5.img` | A fixed factory USB appliance: root autologin (blank password) with a 9-option serial/tty menu; the pre-built target image is embedded in it. |
+| Install medium | `openmux-install-medium-cm5.img` | A fixed factory USB appliance: root autologin (blank password) with an 8-option serial/tty menu; the pre-built target image is embedded in it. |
 
 Typical flow: build both images → flash the **install medium** to a USB
 stick → boot the CM5 from it → menu option 1 writes the target image to
@@ -101,8 +101,13 @@ hooks/                      source-tree hooks (auto-discovered, run after all la
 package/
   openmux-hardware/         udev rules (incl. /dev/serial0 bridge), hw-detect service
   openmux-factory-tools/    eeprom/serial factory utilities
-  openmux-install-menu/     the factory boot menu (menu option 9 toggles overlayroot
-                            by editing cmdline.txt directly - minbase has no raspi-config)
+  openmux-install-menu/     the factory boot menu (option 8 toggles overlayroot
+                            by editing cmdline.txt directly - minbase has no
+                            raspi-config; option 3 is a boot-order/bootloader
+                            sub-menu that shows the current BOOT_ORDER and the
+                            running vs. on-stick bootloader version before any
+                            SPI write, and refuses downgrades, frozen modules
+                            and unverifiable writes)
 device/openmux/.keep        (source-root placeholder; the CM5 device layer is the
                             engine's built-in rpi-cm5)
 ```

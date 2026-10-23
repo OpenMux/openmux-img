@@ -216,7 +216,22 @@ chk   "serial-getty autologin drop-in" "$M/etc/systemd/system/serial-getty@.serv
 chk   "root .bash_profile execs the menu" "$M/root/.bash_profile" 'openmux-menu\.sh'
 [ -x "$M/usr/local/sbin/openmux-menu.sh" ] && ok "openmux-menu.sh installed+exec" || bad "openmux-menu.sh missing"
 [ -f "$M/var/lib/dpkg/info/openmux-install-menu.list" ] && ok "deb openmux-install-menu installed" || bad "install-menu missing"
-[ -f "$M/var/lib/dpkg/info/overlayroot.list" ] && ok "overlayroot installed (menu option 9)" || bad "overlayroot missing"# the medium installs from a fixed-size USB stick - no first-boot resize
+[ -f "$M/var/lib/dpkg/info/overlayroot.list" ] && ok "overlayroot installed (menu option 8)" || bad "overlayroot missing"
+# the medium installs from a fixed-size USB stick - no first-boot resize
+# Menu 1.1.0 merged the two BOOT_ORDER options into one sub-menu that reads the
+# module first. Pin the shipped script to that version, and pin the two binaries
+# its Depends declare, because both menu features degrade SILENTLY when absent:
+# a missing sfdisk skips disk-id regeneration, a missing rpi-eeprom-config makes
+# the boot-order option unreadable.
+chk     "menu is the boot-order sub-menu build"   "$M/usr/local/sbin/openmux-menu.sh" 'boot_order_menu\(\)'
+chk     "menu compares bootloader versions first" "$M/usr/local/sbin/openmux-menu.sh" 'eeprom_write_plan'
+chk_not "menu has no blind BOOT_ORDER rewrite"    "$M/usr/local/sbin/openmux-menu.sh" "sed -i 's/\\^BOOT_ORDER"
+[ -x "$M/usr/sbin/sfdisk" ] \
+  && ok "sfdisk present (regenerate_disk_ids)" \
+  || bad "sfdisk missing - installs would keep the source image PARTUUIDs"
+[ -x "$M/usr/bin/rpi-eeprom-config" ] \
+  && ok "rpi-eeprom present (menu option 3)" \
+  || bad "rpi-eeprom missing - menu option 3 cannot read the bootloader"
 chk_not "medium has NO extend-filesystem unit" "$V/mroot/lib/systemd/system/openmux-extend-filesystem.service" 'openmux-extend-filesystem'
 chk_not "medium has NO extend-filesystem script" "$V/mroot/usr/local/sbin/openmux-extend-filesystem.sh" 'growpart'
 # medium boot vfat also has contents at the partition root (no firmware/)

@@ -2,7 +2,7 @@
 #
 # Build with:  ./build.sh  (no business build spec needed - the medium is a
 #                          fixed factory appliance: root + blank password +
-#                          the 9-option menu + the prebuilt target image
+#                          the 8-option menu + the prebuilt target image
 #                          embedded in it)
 #
 # The `layer:` map selects ONE layer per key (free labels, no list support);

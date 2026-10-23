@@ -22,6 +22,12 @@
 ---
 mmdebstrap:
   packages:
+    # The install menu's regenerate_disk_ids() shells out to sfdisk and only
+    # warns when it is missing, which silently leaves every installed disk with
+    # the SOURCE IMAGE's PARTUUIDs (the collision it exists to prevent). The
+    # deb declares Depends: fdisk as well; this line is what puts the binary in
+    # the rootfs before the hooks below run, so neither path depends on the
+    # other. Both are kept deliberately - see 1.1.0.
     - fdisk
   # The overlay dir (openmux-install-medium.d/overlay) is rsynced into the
   # chroot BEFORE the customize-hooks below run (see rpi-image-gen's
@@ -75,8 +81,8 @@ mmdebstrap:
 
     # --- the install-menu package (medium only) --------------------------------
     # openmux-packages (shared) installs hardware + factory-tools; this layer
-    # adds the 9-option factory menu, which execs from the autologin shell.
-    # Also pulls overlayroot from the distro repos: menu option 9 switches
+    # adds the 8-option factory menu, which execs from the autologin shell.
+    # Also pulls overlayroot from the distro repos: menu option 8 switches
     # the rootfs to a read-only overlayroot=tmpfs at reboot, whose initramfs
     # machinery comes from the overlayroot package.
     - |
