@@ -168,10 +168,12 @@ device is by its USB strings. Role comes from the topology:
 | an EX-12 adapter (plug-in) | `OMX000000-A`/`-B`/`-C` | 3 chips behind the card's own hub, typically `2-1.4` → `.2/.3/.4` | 12, per card: `/dev/openmux/OMX000042/port1..12` |
 
 `OMC` is **OpenMux Console** (the chassis' own chips) and `OMX` is **OpenMux
-eXtention** (a card). The number is six digits by convention, not by rule:
-nothing in the tools, the udev rules or the boot script enforces a width, so a
-serial stamped with four digits is usable — merely unusual. Refusing one would
-make that chassis unprogrammable rather than merely odd.
+eXtention** (a card). The digit run after the prefix is left unspecified on
+purpose: nothing in the tools, the udev rules or the boot script enforces a
+width, so a four-digit and a six-digit serial are equally valid and name the same
+kind of thing. The numbers throughout this file are examples, not a required
+shape. Policing the length would make an odd-looking chassis unprogrammable,
+which is the wrong trade for cosmetics.
 
 `99-openmux-ftdi.rules` (shipped by `openmux-hardware`) is what turns a serial
 into a port number: chip `A`→1-4, `B`→5-8, `C`→9-12, i.e.

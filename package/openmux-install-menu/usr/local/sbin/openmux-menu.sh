@@ -491,8 +491,14 @@ serial_menu() {
     console=$(ftdi_console_summary)
     adapters=$(ftdi_adapter_summary)
     n=$(grep -c . <<<"$adapters")
+    # Each group names the options that act on it, which is the unambiguous way to
+    # say what the old parenthetical tried to: the console's built-in chips are
+    # handled by options 1 and 4 and never by the EX-12 ones. "not offered as a
+    # card" read to an operator with eight live ports like word for word the
+    # description of a fault, so it is gone rather than rephrased.
     if [[ -n $console ]]; then
-      msg "  Console chips : $console   (/dev/openmux/port1-8, not offered as a card)"
+      msg "  Console chips : $console"
+      msg "                  ports 1-8 in /dev/openmux  (program with 1, test with 4)"
     else
       msg "  Console chips : none seen on the internal paths. Either nothing is"
       msg "                  programmed yet, or this board enumerates somewhere"
@@ -500,11 +506,20 @@ serial_menu() {
       msg "                  programming anything."
     fi
     if (( n == 0 )); then
-      msg "  EX-12 cards   : none on the bus"
+      msg "  EX-12 cards   : none on the bus  (program with 2, test with 5)"
     else
-      msg "  EX-12 cards   : $n"
-      while IFS=$'\t' read -r _ bases; do
-        msg "                  ${bases:+programmed as $bases}${bases:-present, not programmed}"
+      msg "  EX-12 cards   : $n  (program with 2, test with 5)"
+      while IFS=$'\t' read -r hub bases; do
+        if [[ -z $bases ]]; then
+          msg "                  hub $hub: present, not programmed"
+        else
+          msg "                  hub $hub: programmed as $bases"
+          # Only when there is exactly one base: two on one hub would mean the
+          # card's own chips disagree, and /dev/openmux/A,B names no folder.
+          if [[ -n $bases && $bases != *,* ]]; then
+            msg "                            /dev/openmux/$bases/port1-12"
+          fi
+        fi
       done <<<"$adapters"
     fi
     msg ""
