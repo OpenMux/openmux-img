@@ -202,7 +202,11 @@ def main():
 
     if not args.dry_run and subprocess.run(
             ["bash", "-lc", "command -v ftdi_eeprom"], capture_output=True).returncode != 0:
-        print("ERROR: missing tool: ftdi_eeprom (package ftdi-eeprom)")
+        # Names the fix rather than just the gap. The package name is a checked
+        # fact, not a guess: ftdi-eeprom 1.5-10 in trixie main, source libftdi1,
+        # installing /usr/bin/ftdi_eeprom.
+        print("ERROR: missing tool: ftdi_eeprom (package ftdi-eeprom, in trixie main)")
+        print("       apt-get install -y ftdi-eeprom")
         return 1
 
     if args.path_a == args.path_b:

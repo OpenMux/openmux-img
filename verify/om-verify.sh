@@ -187,6 +187,17 @@ chk   "extend-filesystem script installed" "$R/usr/local/sbin/openmux-extend-fil
 # packages (local debs from dist/pkgs via openmux-packages layer)
 [ -f "$R/var/lib/dpkg/info/openmux-hardware.list" ] && ok "deb openmux-hardware installed" || bad "openmux-hardware missing"
 [ -f "$R/var/lib/dpkg/info/openmux-factory-tools.list" ] && ok "deb openmux-factory-tools installed" || bad "openmux-factory-tools missing"
+# The flashers and the shell wrappers exec five programs: ftdi_eeprom, sudo,
+# python3, bash and coreutils. bash/coreutils are Essential: yes and present by
+# policy; the other three are Priority: optional, so only the deb's Depends can
+# promise them, and a Depends that does not resolve fails the BUILD (apt non-zero
+# + the set -eu hook) rather than shipping a broken image. Pinned at the artifact
+# anyway: it is three stats, and it answers the question an operator actually has
+# - can this image flash a card - independently of why the build succeeded.
+for b in ftdi_eeprom sudo python3; do
+  [ -x "$R/usr/bin/$b" ] && ok "$b present (tools can exec it)" \
+    || bad "$b missing: flashers would refuse to run"
+done
 # The FTDI tools are the field-service path onto every unit, and the field-service
 # story depends on one fact the console cannot be trusted to remember: the
 # console's own FTDI chips stay on the bus while a card is being programmed. Pin
@@ -284,6 +295,14 @@ chk   "root .bash_profile execs the menu" "$M/root/.bash_profile" 'openmux-menu\
 [ -x "$M/usr/local/sbin/openmux-menu.sh" ] && ok "openmux-menu.sh installed+exec" || bad "openmux-menu.sh missing"
 [ -f "$M/var/lib/dpkg/info/openmux-install-menu.list" ] && ok "deb openmux-install-menu installed" || bad "install-menu missing"
 [ -f "$M/var/lib/dpkg/info/overlayroot.list" ] && ok "overlayroot installed (menu option 8)" || bad "overlayroot missing"
+# The factory flash menu (serial sub-menu options 1 and 2) is the primary way to
+# program a card, so what its scripts exec is pinned here too. Same deb feeds both
+# images, but the images are built separately - one build reaching a mirror that
+# lacks a package says nothing about the other.
+for b in ftdi_eeprom sudo python3; do
+  [ -x "$M/usr/bin/$b" ] && ok "$b on medium (menu can flash)" \
+    || bad "$b missing on medium: menu options 1/2 would refuse"
+done
 # the medium installs from a fixed-size USB stick - no first-boot resize
 # Menu 1.1.0 merged the two BOOT_ORDER options into one sub-menu that reads the
 # module first. Pin the shipped script to that version, and pin the two binaries

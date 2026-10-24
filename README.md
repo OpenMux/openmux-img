@@ -316,11 +316,43 @@ is how the offline tests drive them against a fake sysfs tree with no hardware.
   at plan time and only then read bus/devnum, immediately before each invocation
   (`reassert()`), and stop if the chip they are about to write is not the one they
   described to the operator.
-- **`ftdi_eeprom` is not installed by either image.** The flashers detect it, say
-  which tool is missing and exit non-zero instead of half-running; the scanner,
-  the audit and the loopback tests do not need it. Adding it to
-  `openmux-factory-tools`' `Depends` needs the package name confirmed against the
-  pinned trixie mirror first — until then it is a deliberate gap, not an oversight.
+- **`ftdi_eeprom` is a `Depends` of `openmux-factory-tools`**, which is where a
+  binary some of its scripts exec belongs: the distro ships it as `ftdi-eeprom`
+  (1.5-10, source `libftdi1`, trixie main), and a dependency rides along with the
+  package onto the target, onto the medium and onto any unit a technician installs
+  the deb on by hand. Listing it per-image would have taken two entries - the
+  medium selects no package layer at all - and both would have been able to drift
+  from the scripts that need it. That the deb's `Depends` are really resolved at
+  build time is not assumed: `usbutils` and `python3-serial` are in no layer's
+  package list and appear in both images' manifests anyway - read back out of the
+  built target with `debugfs -R "dump /var/lib/dpkg/status"`, because that install
+  hook runs `apt-get install` with no `apt-get update` first. Worth re-checking on
+  a fresh build: `libftdi1-2` is already installed at the version `ftdi-eeprom`
+  needs (1.5-10, pulled in by `flashrom`), and being the same source package, its
+  presence shows the apt lists that build used contain that package set.
+  Hyphenated package name, underscored binary - the mismatch is why this sat
+  unconfirmed, while the flashers printed the right package name all along and
+  both images shipped a flasher that could only refuse to run.
+- **`sudo` is a dependency too, and was undeclared until it was audited.** Both
+  flashers build `["sudo", "ftdi_eeprom", ...]` unconditionally, so the binary has
+  to exist even when the tools already run as root - which is how the medium runs
+  them, where `sudo` would only ever be a no-op. Its `Priority` is `optional` and
+  no other dependency of the package pulled it: both images carried it purely
+  because the generator's `device-user-admin` layer (the customer admin account)
+  lists it. A tool's ability to flash therefore rested on an unrelated layer's
+  package list - true in every build to date, and invisible if that ever changed.
+  The other externals are `python3` (also `optional`; previously guaranteed only
+  *transitively*, via `python3-serial`'s `Depends: python3:any`, now stated
+  outright) and `bash` + `coreutils`, deliberately left undeclared because Debian
+  marks both `Essential: yes` - required to be present, so a dependency would add
+  nothing. `usbutils` goes the other way: declared, never execed, because nothing
+  runs `lsusb` now that the scanner reads sysfs. It stays because it is what gets
+  typed next to a USB problem, not because a script needs it.
+- **Flashing needs ftdi_sio off the chip**, per that tool's own man page, and every
+  interface of an already-programmed chip is bound to it by default. This kernel
+  ships `ftdi_sio.ko.xz` modular, so the chip can be released - but this has not
+  been exercised on hardware, so treat it as the first thing to check if a flash
+  cannot open a chip, not as a solved step.
 - **A serial prefix is matched in three places, shipped by two packages.**
   `99-openmux-ftdi.rules` (as `OMC[0-9]*-A`), `openmux-detect-hardware.sh` (as a
   shell `case` looking for `OMC*-A`) and `PREFIX_*_DEFAULT` in `scan_ftdi.py`.

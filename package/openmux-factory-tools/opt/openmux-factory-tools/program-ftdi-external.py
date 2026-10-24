@@ -258,7 +258,9 @@ def main():
 
     if not args.dry_run and subprocess.run(
             ["bash", "-lc", "command -v ftdi_eeprom"], capture_output=True).returncode != 0:
-        print("ERROR: missing tool: ftdi_eeprom (package ftdi-eeprom)")
+        # See program-ftdi-internal.py: name the fix, not just the gap.
+        print("ERROR: missing tool: ftdi_eeprom (package ftdi-eeprom, in trixie main)")
+        print("       apt-get install -y ftdi-eeprom")
         return 1
 
     internal_paths = (tuple(p for p in args.internal.replace(",", " ").split() if p)
