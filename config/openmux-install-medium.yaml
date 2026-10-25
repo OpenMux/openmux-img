@@ -3,15 +3,25 @@
 # Build with:  ./build.sh  (no business build spec needed - the medium is a
 #                          fixed factory appliance: root + blank password +
 #                          the 8-option menu + the prebuilt target image
-#                          embedded in it)
+#                          embedded in it + a root filesystem that is READ-ONLY
+#                          by default, so nothing a session writes on the stick
+#                          survives a reboot)
 #
 # The `layer:` map selects ONE layer per key (free labels, no list support);
 # base + serial are inherited from openmux-base.yaml, `medium` is this image's
 # own key. The medium does NOT use the customer APT repo (target-side only).
 # openmux-install-medium does: root account tweaks, getty/autologin drop-ins,
 # defensive first-boot unit masking, install of the local .debs (hardware,
-# factory-tools, install-menu) + overlayroot, and embedding of the target
-# image.
+# factory-tools, install-menu) + overlayroot, embedding of the target image,
+# and - through
+# openmux-install-medium.d/for/linux-base/cmdline.d/30-openmux-overlay - the
+# `overlayroot=tmpfs` kernel parameter that makes the stick's root read-only by
+# default (menu option 8 clears it again). The layer header explains why that
+# setting is contributed as a cmdline fragment, why `ro` must never accompany
+# it, and why the layer additionally ships an initramfs-tools hook: this minbase
+# initrd has no grep (so overlayroot cannot find its overlay driver) and its
+# mount is klibc's, which cannot do the `mount --move` overlayroot needs -
+# without those two the stick boots read-write and says almost nothing.
 #
 # The device's user1 slot is filled by an INERT account (name "user1", no
 # password -> locked): the factory login is root (blank password and

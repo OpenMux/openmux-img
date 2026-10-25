@@ -113,6 +113,11 @@ chk_not   "cmdline.txt: no console=tty1 (HDMI)"  "$B/cmdline.txt" 'console=tty1'
   || bad "cmdline.txt: $(grep -Eo 'console=[^ ]+' "$B/cmdline.txt" | wc -l) console= tokens, want 1 (serial only)"
 chk_not   "cmdline.txt: no stale root=ROOTDEV"   "$B/cmdline.txt" 'ROOTDEV'
 chk_not   "cmdline.txt: single root= token"      "$B/cmdline.txt" 'root=.*root='
+# Read-only-by-default belongs to the INSTALL MEDIUM alone (its layer owns the
+# overlayroot cmdline fragment). If it ever reached the target, every CM5 the
+# stick installs would discard its own writes - apt, keys, logs, everything.
+chk_not   "target cmdline: no overlayroot (target must stay writable)" \
+  "$B/cmdline.txt" 'overlayroot='
 # The target boots from eMMC (firmware boot-mode 1), so the by-slot symlinks DO
 # exist here - unlike the USB medium, see the medium section below.
 chk       "cmdline.txt: real root device"        "$B/cmdline.txt" 'root=/dev/disk/by-slot/system'
@@ -294,7 +299,25 @@ chk   "serial-getty autologin drop-in" "$M/etc/systemd/system/serial-getty@.serv
 chk   "root .bash_profile execs the menu" "$M/root/.bash_profile" 'openmux-menu\.sh'
 [ -x "$M/usr/local/sbin/openmux-menu.sh" ] && ok "openmux-menu.sh installed+exec" || bad "openmux-menu.sh missing"
 [ -f "$M/var/lib/dpkg/info/openmux-install-menu.list" ] && ok "deb openmux-install-menu installed" || bad "install-menu missing"
-[ -f "$M/var/lib/dpkg/info/overlayroot.list" ] && ok "overlayroot installed (menu option 8)" || bad "overlayroot missing"
+# overlayroot is not optional here any more: the image boots read-only BY
+# DEFAULT (cmdline fragment in openmux-install-medium), and this package's
+# initramfs hook is what puts the overlay machinery into the initrd.
+[ -f "$M/var/lib/dpkg/info/overlayroot.list" ] \
+  && ok "overlayroot installed (default read-only root)" \
+  || bad "overlayroot missing: the medium cannot boot its read-only overlay root"
+# The package is necessary but NOT sufficient: overlayroot detects its driver by
+# grepping /proc/filesystems (once before modprobe -qb, once after), and a minbase
+# initrd built with --no-install-recommends contains no grep at all, so the probe
+# cannot succeed and overlayroot logs a failure and exits 0 on a read-write root.
+# This hook puts grep/sed and a usable mount into the initrd; the build itself
+# asserts the RESULT inside the finished boot.vfat (postimage30-overlayroot-check,
+# which is the check that matters), so pin the hook here and the artifacts there.
+chk "medium ships the initrd grep/sed hook" \
+  "$M/etc/initramfs-tools/hooks/openmux-overlayroot-tools" 'copy_exec /usr/bin/grep'
+# Same hook, second requirement: the initrd's own mount comes from klibc and
+# takes no long options, so overlayroot's `mount --move` needs util-linux's there.
+chk "medium initrd hook also installs util-linux mount" \
+  "$M/etc/initramfs-tools/hooks/openmux-overlayroot-tools" 'copy_exec /bin/mount'
 # The factory flash menu (serial sub-menu options 1 and 2) is the primary way to
 # program a card, so what its scripts exec is pinned here too. Same deb feeds both
 # images, but the images are built separately - one build reaching a mirror that
@@ -346,6 +369,30 @@ chk_not "medium has NO extend-filesystem script" "$V/mroot/usr/local/sbin/openmu
 # console=tty1 but from the explicit getty@tty1.service enablement checked above
 chk     "medium cmdline: serial console present" "$V/mboot/cmdline.txt" 'console=serial0,115200'
 chk_not "medium cmdline: no console=tty1"        "$V/mboot/cmdline.txt" 'console=tty1'
+# The medium's root is READ-ONLY BY DEFAULT: the openmux-install-medium layer
+# adds overlayroot=tmpfs, so the initramfs mounts the stick's ext4 read-only at
+# /media/root-ro and runs the whole session in a tmpfs overlay. The line-count
+# pin below is what proves the token is on line 1: the firmware appends
+# cmdline.txt but ignores everything after the first line, so a token anywhere
+# else is silently dropped.
+chk     "medium cmdline: read-only overlay root"  "$V/mboot/cmdline.txt" '(^|[[:space:]])overlayroot=tmpfs([[:space:]]|$)'
+n_mcmd=$(grep -c '' "$V/mboot/cmdline.txt")
+[ "$n_mcmd" = "1" ] && ok "medium cmdline: exactly one line" \
+  || bad "medium cmdline: $n_mcmd lines, want 1 (firmware reads only the first)"
+# `ro` is NOT the harmless-looking default it appears to be on an appliance:
+# overlayroot turns it into cmdline_ro, which remounts the OVERLAY read-only, so
+# apt / passwd / the EEPROM staging the menu performs mid-session would fail.
+# The read-only LOWER layer comes from Debian's initramfs `export readonly=y`,
+# not from this parameter, so the image must ship neither ro nor rw.
+chk_not "medium cmdline: no ro (session must stay writable)" "$V/mboot/cmdline.txt" '(^|[[:space:]])ro([[:space:]]|$)'
+# The overlay is created at boot, so the built image must carry no leftovers of
+# one: a baked-in /overlay workdir or a populated /media would shadow or confuse
+# the mounts the initramfs sets up (verified against the staged rootfs).
+if [ ! -e "$M/overlay" ] && [ -z "$(ls -A "$M/media" 2>/dev/null)" ]; then
+  ok "medium rootfs has no baked-in overlay leftovers"
+else
+  bad "medium rootfs carries overlay leftovers (/overlay present, or /media not empty)"
+fi
 # The medium boots from USB: /dev/disk/by-slot/* can never exist there
 # (rpi-storage-binder maps firmware boot-mode 1=mmcblk0/6=nvme0n1 only, and
 # image-rpios's rule matches no sdX). root= must therefore be PARTUUID-based,

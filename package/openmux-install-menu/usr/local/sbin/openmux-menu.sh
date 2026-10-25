@@ -1002,64 +1002,92 @@ run_board_tests() {
   pause
 }
 
+# Is the RUNNING system an overlaid (read-only) root? The mount is the truth here,
+# not /proc/cmdline: the command line records what was REQUESTED, and a request can
+# be lost (the token has to be on the first line of cmdline.txt for the firmware to
+# pass it on), so reporting the mount keeps the banner honest even about a stick
+# whose cmdline.txt was edited by hand.
 overlayfs_status() {
-  if grep -q 'overlayroot=tmpfs' /proc/cmdline 2>/dev/null; then
+  if [[ "$(findmnt -no FSTYPE / 2>/dev/null)" == "overlay" ]]; then
     echo "enabled"
   else
     echo "disabled"
   fi
 }
 
+# Add or drop the overlayroot token in the firmware's cmdline.txt. Every part of
+# this is load-bearing: the file must stay a SINGLE line, because the firmware
+# appends it to the kernel command line and ignores everything after the first
+# line, so appending a second line is silently a no-op. Hence: read the whole
+# file, strip any overlayroot token and stray whitespace, re-add when enabling,
+# write back one line with one trailing newline. Non-zero if the vfat is not
+# writable.
+set_overlayroot_token() { # set_overlayroot_token <add|drop>
+  local mode=${1:-} cmdline="/boot/firmware/cmdline.txt" line
+  [[ "$mode" == "add" || "$mode" == "drop" ]] || return 2
+  [[ -f "$cmdline" ]] || return 1
+  line="$(tr -d '\n\r' < "$cmdline")"
+  line="$(printf '%s' "$line" |
+    sed -E 's/[[:space:]]*overlayroot=[^[:space:]]*//g; s/[[:space:]]{2,}/ /g; s/[[:space:]]+$//')"
+  [[ "$mode" != "add" ]] || line="$line overlayroot=tmpfs"
+  # Never add `ro` alongside it: the read-only lower layer comes from the
+  # initramfs' default readonly=y, while an `ro` parameter turns into
+  # overlayroot's cmdline_ro and remounts the OVERLAY read-only, which would
+  # break apt, passwd and the EEPROM staging this menu does in the session.
+  printf '%s\n' "${line# }" > "$cmdline"
+}
+
 toggle_overlayfs() {
-  local current target action
+  local current mode action
   current="$(overlayfs_status)"
   if [[ "$current" == "enabled" ]]; then
-    target=1
+    mode="drop"
     action="disable"
-    msg "The overlay root filesystem is currently ENABLED: writes to the root"
-    msg "filesystem are discarded on reboot. Disabling it makes the filesystem"
-    msg "persistent (writable) again."
+    msg "This stick is running a READ-ONLY root: / is a temporary overlay in RAM"
+    msg "above the ext4 partition, which is mounted read-only at /media/root-ro."
+    msg "Everything written to / - apt installs, passwd, hand edits, logs - is"
+    msg "gone at the next reboot. Disabling it makes the root persistent (and"
+    msg "writable) again."
   else
-    target=0
+    mode="add"
     action="enable"
-    msg "The overlay root filesystem is currently DISABLED: the filesystem is"
-    msg "persistent (writable). Enabling it makes the root filesystem read-only,"
-    msg "discarding all writes to it on reboot."
+    msg "This stick is running its ext4 root directly: writes to / survive a"
+    msg "reboot. Enabling the read-only overlay puts a temporary RAM layer over"
+    msg "the root partition, discarding every write to / made after the change."
   fi
 
   msg "Note: this only affects the install medium (this USB stick) itself, not any"
   msg "system flashed with option 1."
-  msg "The system will reboot after the change to apply it."
+  msg "The boot partition is never overlaid, so this setting - and only this"
+  msg "setting - is kept. The system will reboot after the change to apply it."
   msg ""
   local confirm
-  read -rp "$action it? (y/N): " confirm
+  # Prompt on stderr explicitly rather than with read -p: read only prints its
+  # prompt when stdin is a terminal, and this menu also gets driven over pipes.
+  printf '%s it? (y/N): ' "$action" >&2
+  read -r confirm
   if [[ ! "$confirm" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
     msg "Aborted."
     pause
     return
   fi
 
-  # Minbase has no raspi-config; toggle the parameter by editing
-  # /boot/firmware/cmdline.txt directly and refreshing the initramfs.
-  local cmdline="/boot/firmware/cmdline.txt"
-  if [[ ! -f "$cmdline" ]]; then
-    msg "cmdline.txt not found at $cmdline."
+  if ! set_overlayroot_token "$mode"; then
+    msg "Could not rewrite /boot/firmware/cmdline.txt - is the boot partition"
+    msg "mounted read-only, or missing? Nothing was changed; no reboot."
     pause
     return
   fi
 
-  if [[ "$target" == 1 ]]; then
-    grep -qw 'overlayroot=tmpfs' "$cmdline" || printf 'overlayroot=tmpfs\n' >> "$cmdline"
-  else
-    sed -i 's/ *overlayroot=tmpfs//; s/  */ /g; s/ *$//' "$cmdline"
-  fi
-
-  if command -v update-initramfs >/dev/null 2>&1; then
-    update-initramfs -u >/dev/null 2>&1 || \
-      msg "WARNING: update-initramfs -u failed; the change may not take effect until the next boot."
-  fi
-
-  msg "Overlay filesystem setting updated. Rebooting for it to take effect..."
+  # No update-initramfs here, deliberately: nothing in the initrd reads
+  # cmdline.txt. overlayroot's initramfs script parses the kernel command line
+  # at boot - where it outranks /etc/overlayroot.conf - and it ships in this
+  # initrd already, so the toggle takes effect on the next boot regardless.
+  msg ""
+  msg "New kernel command line:"
+  msg "  $(tr -d '\n' < /boot/firmware/cmdline.txt)"
+  sync
+  msg "Read-only root setting updated. Rebooting for it to take effect..."
   reboot
 }
 
@@ -1077,7 +1105,7 @@ main_menu() {
   5) Drop to shell
   6) Reboot
   7) Power off
-  8) Toggle read-only overlay filesystem (currently: $(overlayfs_status))
+  8) Toggle USB stick read-only mode (currently: $(overlayfs_status))
 ========================================
 EOF
     local choice

@@ -1,5 +1,5 @@
 Package: openmux-install-menu
-Version: 1.2.0
+Version: 1.3.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
 Homepage: https://github.com/OpenMux
@@ -13,12 +13,15 @@ Description: OpenMux install medium boot menu (neutral utility)
  FTDI chips held out of the way), a boot-order and bootloader sub-menu that
  shows the current BOOT_ORDER and both bootloader versions before writing (and
  refuses downgrades, frozen modules and unverifiable writes), run board tests,
- drop to a shell, reboot/power off, and toggle the stick's overlay root
- filesystem.
+ drop to a shell, reboot/power off, and toggle the stick's read-only root
+ filesystem on and off.
  .
- The menu is a neutral utility only; autologin, the root shell profile and any
+ The menu is a neutral utility only; autologin, the root shell profile, the
+ read-only-by-default root (an overlayroot=tmpfs kernel parameter) and any
  other factory boot behaviour are not part of this package - they are applied
- by the openmux-install-medium layer at build time.
+ by the openmux-install-medium layer at build time. Toggling means rewriting the
+ single line of /boot/firmware/cmdline.txt, because the firmware appends that
+ file to the kernel command line and ignores every line after it.
  .
  Every Depends backs a feature that degrades to a warning when its tool is
  absent: xz-utils/zstd decompress the embedded images, fdisk provides the

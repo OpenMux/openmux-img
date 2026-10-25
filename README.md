@@ -10,7 +10,7 @@ One entry point — `./build.sh` — produces **two** images:
 | Image | Name | What it is |
 |---|---|---|
 | Target | `openmux-cm5.img` | The installable device image. Accounts, APT repo and packages come from the customer **build spec**. |
-| Install medium | `openmux-install-medium-cm5.img` | A fixed factory USB appliance: root autologin (blank password) with an 8-option serial/tty menu; the pre-built target image is embedded in it. |
+| Install medium | `openmux-install-medium-cm5.img` | A fixed factory USB appliance: root autologin (blank password) with an 8-option serial/tty menu; the pre-built target image is embedded in it. Its root filesystem is **read-only by default**, so nothing a session writes on the stick survives a reboot (menu option 8 is the escape hatch). |
 
 Typical flow: build both images → flash the **install medium** to a USB
 stick → boot the CM5 from it → menu option 1 writes the target image to
@@ -94,16 +94,27 @@ layer/
                             the pinned engine; this is the documented mechanism)
   openmux-app/              distro packages (curl, git) + custom-repo packages list
   openmux-install-medium/   factory tuning + embedding the target image + menu deb;
-                            .d/overlay/ carries root autologin drop-ins and
-                            /root/.bash_profile (runs the menu)
+                            .d/overlay/ carries root autologin drop-ins,
+                            /root/.bash_profile (runs the menu) and an
+                            initramfs-tools hook that gives the initrd
+                            grep/sed and a mount that knows --move (overlayroot
+                            needs all three); .d/for/linux-base/
+                            cmdline.d/30-openmux-overlay adds the
+                            overlayroot=tmpfs parameter that makes the stick's
+                            root read-only by default, and
+                            .d/hooks/late/postimage30-overlayroot-
+                            check fails the build by reading the finished
+                            boot.vfat
 hooks/                      source-tree hooks (auto-discovered, run after all layers);
                             build-time hook materialized by the parser is git-ignored
 package/
   openmux-hardware/         udev rules (incl. /dev/serial0 bridge), hw-detect service
   openmux-factory-tools/    eeprom/serial factory utilities
-  openmux-install-menu/     the factory boot menu (option 8 toggles overlayroot
-                            by editing cmdline.txt directly - minbase has no
-                            raspi-config; option 3 is a boot-order/bootloader
+  openmux-install-menu/     the factory boot menu (option 8 toggles the stick's
+                            read-only root by rewriting the ONE line of
+                            cmdline.txt - minbase has no raspi-config, and the
+                            parameter itself is an image default from the layer
+                            fragment above; option 3 is a boot-order/bootloader
                             sub-menu that shows the current BOOT_ORDER and the
                             running vs. on-stick bootloader version before any
                             SPI write, and refuses downgrades, frozen modules
@@ -284,6 +295,82 @@ is how the offline tests drive them against a fake sysfs tree with no hardware.
   and each config's `image:` section must come AFTER `device:` (the image
   layer's `-root=*`/`root=…` cmdline fragment must apply last, replacing the
   `root=ROOTDEV` placeholder).
+- **Read-only root on the install medium.** The medium boots with
+  `overlayroot=tmpfs`: the initramfs mounts the stick's ext4 read-only at
+  `/media/root-ro` and puts a tmpfs-backed overlay over `/`, so an operator's
+  `apt install`, `passwd`, hand edits, freshly generated SSH host keys and the
+  whole journal are gone at the next reboot and the same stick presents the same
+  state to the next console. Like the console tokens above, the parameter comes
+  from a `cmdline.d` fragment (`30-openmux-overlay` in `openmux-install-medium`)
+  - which is also the only place it could reliably live: `linux-base` applies the
+  fragments from a **late preimage** hook, i.e. after every layer's customize
+  hooks and deb installs, so nothing later can overwrite it, and at boot the
+  kernel command line outranks `/etc/overlayroot.conf` anyway
+  (`conf-hooks.d/90-kernel` is the last config hook). That file is therefore
+  left stock, and `overlayroot-chroot` keeps working as the way to inspect a
+  running stick's real root.
+  Two parameters are deliberately left OUT. `ro` is the tempting one, and does
+  the opposite of what it looks like: the lower layer is read-only because
+  Debian's initramfs `export`s `readonly=y`, while an `ro` on the command line
+  sets overlayroot's `cmdline_ro`, which remounts the **overlay** read-only -
+  apt, `passwd` and the menu's EEPROM staging would then fail mid-session. And
+  `:recurse=0` would look necessary to keep `/boot/firmware` writable, but
+  overlayroot only recurses into block-device fstab entries and passes `vfat`
+  through as an unsupported filesystem (replaying the shipped
+  `overlayrootify_fstab` over this image's fstab with `recurse=1` and `0`
+  produced byte-identical output).
+  Installing the `overlayroot` package is necessary but NOT sufficient,
+  and neither shortfall shows up in the config: both leave an ordinary
+  read-write boot with `overlayroot=tmpfs` plainly in `/proc/cmdline`,
+  because overlayroot's failure path is `fail(){ log_fail "$@"; exit 0; }`.
+  Its initramfs script *is* in the initrd, and first in `init-bottom/ORDER`,
+  but it picks the overlay driver by grepping `/proc/filesystems` twice
+  (`grep -q "\t$module$"` before and after `modprobe -qb`), and **this initrd
+  has no `grep`**: the image is minbase with `--no-install-recommends`,
+  and `BUSYBOX=auto` only pays off through a busybox-initramfs hook,
+  which is not among this image's hooks (`dmsetup fsck keymap klibc-utils
+  kmod overlayroot raspi-firmware-fsck resume thermal udev`). Clearing
+  that meets the next one: the initrd's `mount` is klibc's, which takes
+  no long options, so `mount --move "$ROOTMNT" "$root_ro"` - the call
+  that installs the read-only lower layer - fails the same silent way.
+  `.d/overlay/etc/initramfs-tools/hooks/openmux-overlayroot-tools` therefore
+  copies `grep`, `sed` and `rm` in and replaces `mount` with util-linux's,
+  rather than adding busybox for three call sites - which would not settle it
+  anyway, since busybox's mount takes `-o move` and has no `--move`. Raspberry
+  Pi forum thread 398145 ("Get overlayroot to work on a rpi-image-gen image
+  for RPI5", also `trixie-minbase`) reaches the same diagnosis and does
+  install busybox. Because the entire failure is one console line, the
+  build checks the artifact: `postimage30-overlayroot-check` reads the
+  finished `boot.vfat` and runs `lsinitramfs`, plus an unpack of the
+  initrd, through the rootfs just built, failing unless the initrd the
+  firmware loads contains `scripts/init-bottom/overlayroot`, `bin/grep`,
+  `bin/sed`, `overlay.ko` and a mount that can do `--move` - a name in a
+  listing says nothing about which implementation it is. Postimage is the
+  only phase that can: `linux-base` assembles the `cmdline.d` fragments
+  from a **late preimage** hook and `rpi-linux-base` installs the result
+  over `/boot/firmware/cmdline.txt`, and both layers sort after this
+  one, so a preimage hook sees only the template (`root=ROOTDEV`) and can
+  only reject it. On a booted stick, overlayroot keeps its own record at
+  `/run/initramfs/overlayroot.log` (it survives `pivot_root`): `Unable to
+  find driver/module. searched: overlay overlayfs` is the missing-`grep`
+  case, `failed to move root away from` the missing-`--move` case, and a
+  `configured root with 'tmpfs'` line means it worked.
+  The guard reads `boot.vfat` through `mdu` only, in a new session (`setsid`). A
+  stray prompt is a hang rather than an error, because mtools asks on `/dev/tty`,
+  and neither `</dev/null` nor `timeout` ends one. `build.sh` runs the container
+  without `-t`, so a build has no terminal to answer on. `mdu` is the only verb
+  that neither asks nor misreports: `mmd` exits 0 for a *missing* member, `mdir`
+  pads and 8.3-abbreviates names so they cannot be matched, and `mtype` exits 0
+  for a directory. Loop-mounting would sidestep all of it (`build.sh` passes
+  `--privileged`), but a mount leaked by a killed hook leaves a loop device
+  attached to the image file.
+  `cmdline.txt` has to stay a SINGLE line, because the firmware appends the file to
+  the kernel command line and ignores everything after the first line - so a toggle
+  that `>>` appends a second line is silently a no-op in both directions. The
+  verifier pins the token, the one-line shape and the absence of `ro`; that a
+  booted stick really is overlaid can only be seen on the stick itself -
+  `findmnt /` must report `overlay` and `findmnt -o OPTIONS /media/root-ro` must
+  contain `ro`.
 - **`/dev/serial0`.** Stock minbase has no udev rule for it;
   `openmux-hardware` ships `99-openmux-serial0.rules`
   (SYMLINK for `ttyAMA0`) because the factory menu references `/dev/serial0`.

@@ -1,0 +1,174 @@
+#!/bin/sh
+# Fail the build unless the install medium, as written on disk, boots read-only.
+#
+# This is a POSTIMAGE hook because the kernel command line does not exist at
+# preimage time: each layer contributes a fragment under
+# .d/for/linux-base/cmdline.d/, linux-base's LATE preimage hook assembles them
+# into /etc/kernel/cmdline, and rpi-linux-base's late hook of the same name
+# installs the result over /boot/firmware/cmdline.txt - both layers sorting
+# after this one in the plan. A preimage check can only see the template
+# (`root=ROOTDEV`) and reject it. After genimage nothing else touches these
+# files, and boot.vfat is precisely what the firmware reads.
+#
+# The artifact is also the only place this can be checked at all. overlayroot's
+# failure path is `fail(){ log_fail "$@"; exit 0; }`, so a medium that cannot
+# honour overlayroot=tmpfs boots normally with a read-write root and one FAIL
+# line on serial: a fragment, a config file and an installed package can each
+# look perfect while the initrd disagrees. See
+# overlay/etc/initramfs-tools/hooks/openmux-overlayroot-tools for what it needs.
+#
+# Checked out of the image:
+#   cmdline.txt     exactly one line (the firmware ignores the rest),
+#                   `overlayroot=tmpfs` exactly once, no bare `ro`/`rw` (that
+#                   makes the OVERLAY read-only, not the lower layer, and breaks
+#                   apt/passwd/EEPROM staging), no leftover ROOTDEV;
+#   initramfs_2712  present (config.txt sets auto_initramfs=1) and able to act on
+#                   the token: overlayroot's init-bottom script, the overlay
+#                   module, grep and sed for its driver probe, and a mount that
+#                   understands `--move`.
+#
+# The build container has no initramfs-tools, zstd or cpio - the initrd is built
+# inside the chroot - so lsinitramfs and unmkinitramfs run there.
+#
+# $1 = image output dir (the runner's postimage argument).
+set -eu
+
+die() { echo "overlayroot-check: $*" >&2; exit 1; }
+
+IMG=${1:-}
+[ -n "$IMG" ] && [ -d "$IMG" ] || die "expected the image output dir as \$1"
+[ -n "${IGconf_target_path:-}" ] && [ -d "$IGconf_target_path" ] ||
+	die "IGconf_target_path is not a directory: the initrd tools are in the image, not in the build container"
+CHROOT=$IGconf_target_path
+VFAT=$IMG/boot.vfat
+[ -f "$VFAT" ] || die "$VFAT missing: no boot partition to check"
+
+# Unique per hook run; REL is the path as the chroot sees it. TMPDIR is handed to
+# mktemp explicitly instead of being trusted to be inside the chroot - the engine
+# points it at a per-run directory that is not always one.
+REL=/tmp/openmux-overlayroot-check.$$
+T=$(mktemp -d "${TMPDIR:-/tmp}/openmux-overlayroot-check.XXXXXX") || die "mktemp failed"
+trap 'rm -rf "$T" "$CHROOT$REL" "$CHROOT$REL.d"' EXIT INT TERM HUP
+
+# --- 1. the kernel must be told, on the one line the firmware reads ---------
+# boot.vfat is read through mtools, under two constraints:
+#   * A prompt is a hang, not an error. mtools asks on /dev/tty rather than on
+#     stdin, so `</dev/null` does not defuse one and `timeout` does not end one
+#     (it signals its own child; the tool is blocked in a tty read and holds the
+#     pipeline open). build.sh runs the container without -t, so a build has no
+#     terminal to prompt on; the new session below keeps that true when someone
+#     runs this hook from a shell.
+#   * Only verbs that never ask, and that cannot misreport a match. `mdu` prints
+#     disk usage, so it exits 0 for a member that exists and non-zero otherwise.
+#     `mmd` exits 0 for a MISSING member and prompts for an existing one; `mdir`
+#     pads ("cmdline  txt") and 8.3-abbreviates ("INITRA~1"), so its output
+#     cannot be matched against a file name; `mtype` exits 0 for a directory.
+MT_SETSID=""
+if command -v setsid >/dev/null 2>&1 && setsid -f -w true >/dev/null 2>&1; then
+	# Only used where it works, because vfat_has depends on the exit status: -f -w
+	# must still propagate it (0 = member present, non-zero = absent).
+	MT_SETSID=setsid
+fi
+mt() {
+	if [ -n "$MT_SETSID" ]; then setsid -f -w "$@" </dev/null; else "$@" </dev/null; fi
+}
+# Loop-mounting would be the obvious non-interactive alternative, and would work
+# since build.sh passes --privileged, but a mount leaked by a killed hook leaves
+# a loop device holding the image file - so the stateless tool is used, detached
+# from any controlling terminal.
+vfat_has() { mt mdu -i "$VFAT" "::$1" >/dev/null 2>&1; }
+
+# Documentation rots, so the rule above is checked rather than trusted: a hook
+# that blocks is worse than no hook, because the build only looks slow. Command
+# position only, so comments cannot match and a false positive cannot block a
+# good build ($0 is always this file - the runner execs hooks by path).
+if grep -Eq '^[[:space:]]*(mt[[:space:]]+)?(mmd|mdir|mtype|mdel|mmove|mlabel|mformat)[[:space:]]' "$0" 2>/dev/null; then
+	die "this hook has grown a prompt-capable mtools call: mtools asks on /dev/tty, so it would wait forever on a terminal a build does not have"
+fi
+
+mt mdu -i "$VFAT" :: >/dev/null 2>&1 ||
+	die "boot.vfat is not a readable FAT filesystem: genimage wrote what the firmware could never mount"
+vfat_has cmdline.txt ||
+	die "boot.vfat has no cmdline.txt: the kernel would get no command line at all"
+mt mcopy -n -i "$VFAT" ::cmdline.txt "$T/" ||
+	die "could not copy cmdline.txt out of boot.vfat"
+CMDLINE=$T/cmdline.txt
+[ -s "$CMDLINE" ] || die "cmdline.txt in boot.vfat is empty"
+nlines=$(grep -c '' "$CMDLINE" || echo 0)
+[ "$nlines" = "1" ] ||
+	die "cmdline.txt has $nlines lines, must be exactly 1: the firmware ignores every line after the first"
+nover=$(grep -Eo '(^|[[:space:]])overlayroot=tmpfs([[:space:]]|$)' "$CMDLINE" | wc -l)
+[ "$nover" = "1" ] ||
+	die "cmdline.txt must contain overlayroot=tmpfs exactly once, found $nover - got: $(cat "$CMDLINE")"
+if grep -Eq '(^|[[:space:]])(ro|rw)([[:space:]]|$)' "$CMDLINE"; then
+	die "cmdline.txt carries a bare ro/rw - with overlayroot that makes the OVERLAY (not the lower layer) read-only"
+fi
+if grep -q 'ROOTDEV' "$CMDLINE"; then
+	die "cmdline.txt still carries the ROOTDEV placeholder - the cmdline.d fragments were never assembled into the image"
+fi
+
+# --- 2. the initrd the firmware loads must be able to honour it ------------
+[ -e "$CHROOT/etc/initramfs-tools/hooks/openmux-overlayroot-tools" ] ||
+	die "the initramfs hook that adds grep/sed and replaces klibc mount did not land in the rootfs - overlayroot would fail its driver probe"
+vfat_has initramfs_2712 ||
+	die "boot.vfat has no initramfs_2712 - config.txt sets auto_initramfs=1, so the firmware boots the kernel with no initrd and no overlay machinery at all"
+mt mcopy -n -i "$VFAT" ::initramfs_2712 "$T/" ||
+	die "could not copy initramfs_2712 out of boot.vfat"
+# Believe the file rather than the exit code: a truncated initrd would still let
+# lsinitramfs print a plausible listing of nothing.
+[ -s "$T/initramfs_2712" ] ||
+	die "initramfs_2712 came out of boot.vfat empty: cannot inspect the initrd the firmware loads"
+cp "$T/initramfs_2712" "$CHROOT$REL" ||
+	die "could not stage the initrd at $CHROOT$REL for inspection"
+
+# lsinitramfs, unmkinitramfs, zstd, cpio and find all come in with
+# initramfs-tools/kmod/coreutils/findutils, which the initrd exists because of.
+listing=$(chroot "$CHROOT" lsinitramfs "$REL" 2>/dev/null) || listing=""
+[ -n "$listing" ] || die "lsinitramfs produced no listing for initramfs_2712 - cannot verify it"
+# The initrd keeps its programs under usr/bin with bin/ alongside, so match the
+# path tail instead of one absolute spelling.
+for want in "scripts/init-bottom/overlayroot" "bin/grep" "bin/sed" "bin/mount"; do
+	case "$listing" in
+	*"$want"*) : ;;
+	*) die "initramfs_2712 has no $want - the read-only root cannot work (on a booted medium this is the '[failure]: Unable to find a driver' line in /run/initramfs/overlayroot.log)" ;;
+	esac
+done
+# The driver has to be loadable in there too: /proc/filesystems lists overlay
+# only once the initrd's own modprobe has loaded it (that load-then-recheck is
+# the second grep in search_fs_driver).
+case "$listing" in
+*overlay.ko*) : ;;
+*) die "initramfs_2712 has no overlay module - overlayroot would find no driver" ;;
+esac
+
+# A name in a listing cannot say WHICH mount it is, so unpack and look:
+# overlayroot moves the real root aside with `mount --move "$ROOTMNT" "$root_ro"`,
+# and klibc mount - what the initrd gets unopposed - knows no long options.
+if ! mount_verdict=$(chroot "$CHROOT" sh -c '
+# BEGIN mount-provenance script (runs in /bin/sh inside the image; a test harness
+# extracts the text between the BEGIN and END sentinels and runs it as written).
+# No apostrophes in these comments: this whole block is one single-quoted
+# argument, so one here is a syntax error rather than a comment.
+	# A chroot starts with a minimal PATH, and unmkinitramfs finds its decompressor
+	# and cpio through it - without this the unpack fails for the wrong reason.
+	PATH=/usr/sbin:/usr/bin:/sbin:/bin
+	d="$1.d"
+	rm -rf "$d"
+	mkdir -p "$d" || { echo "no writable /tmp to unpack the initrd in"; exit 1; }
+	if ! unmkinitramfs "$1" "$d" >/dev/null 2>&1; then
+		rm -rf "$d"
+		echo "unmkinitramfs could not unpack it"
+		exit 1
+	fi
+	n=$(find "$d" -path "*/bin/mount" -type f | wc -l)
+	nok=$(find "$d" -path "*/bin/mount" -type f -exec grep -qa -e --move {} ";" -print | wc -l)
+	rm -rf "$d"
+	[ "$n" != 0 ] || { echo "carries no mount program at all"; exit 1; }
+	[ "$nok" = "$n" ] || { echo "ships klibc mount, which has no --move: on a booted medium /run/initramfs/overlayroot.log stops at failed-to-move-root"; exit 1; }
+	exit 0
+# END mount-provenance script
+' check "$REL" 2>/dev/null); then
+	die "initramfs_2712: ${mount_verdict:-mount provenance could not be determined}"
+fi
+
+echo "overlayroot-check: OK (boot.vfat: 1-line cmdline with overlayroot=tmpfs and no ro; initramfs_2712 has the overlayroot script, grep/sed, util-linux mount and overlay.ko)"

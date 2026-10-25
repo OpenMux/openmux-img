@@ -1,0 +1,67 @@
+#!/bin/sh
+# Give the install medium's initramfs what overlayroot needs to honour
+# overlayroot=tmpfs: grep, sed and rm, plus a mount that understands --move.
+#
+# Installing the overlayroot deb is necessary but NOT sufficient. Its initramfs
+# script does land in the initrd, and is first in init-bottom/ORDER, but it
+# selects the overlay driver by grepping /proc/filesystems -
+#
+#     grep -q "${tab}$m$" /proc/filesystems           # supported already?
+#     modprobe -qb "$m" && grep -q "${tab}$m$" ...    # ...or after loading it?
+#
+# - and this initrd has no grep. The image is a minbase built with
+# --no-install-recommends: initramfs.conf says BUSYBOX=auto, but busybox arrives
+# only through a busybox-initramfs hook, and this image has just dmsetup, fsck,
+# keymap, klibc-utils, kmod, overlayroot, raspi-firmware-fsck, resume, thermal and
+# udev. search_fs_driver therefore cannot succeed, fail() logs "Unable to find a
+# driver. searched: overlay overlayfs" and `exit 0`s on purpose, and the stick
+# boots read-write with the token plainly in /proc/cmdline. Upstream never
+# mentions grep because a usual Debian system has busybox providing it.
+#
+# busybox is not installed to fix that: it would trade working initrd binaries for
+# applets, and add a package to a factory appliance, for three call sites - and its
+# mount takes `-o move`, not `--move` either (below). `rm` is for overlayroot's
+# EXIT trap (cleanup -> rm -Rf "$TEMP_D"), where the alternative is an
+# "rm: not found" on every boot burying the next real message.
+#
+# Runs at initramfs-tools hook time (mkinitramfs / update-initramfs) inside the
+# chroot, so copy_exec can pull the binaries and their libraries in.
+# hooks/late/postimage30-overlayroot-check asserts the result in the built initrd.
+set -e
+
+# Run after klibc-utils on purpose: that hook is what puts klibc's mount in the
+# initrd, and this hook has to replace it (see below) rather than race it.
+PREREQS="klibc-utils"
+case $1 in
+	prereqs) echo "${PREREQS}"; exit 0;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+# /usr/bin is the real location on trixie (/bin is a symlink); copying into
+# /bin mirrors what overlayroot's own hook does for head and sha512sum.
+copy_exec /usr/bin/grep /bin
+copy_exec /usr/bin/sed /bin
+copy_exec /usr/bin/rm /bin
+
+# grep alone is not enough. With it, overlayroot reaches the point of moving the
+# real root out of the way:
+#
+#     mount --move "${ROOTMNT}" "${root_ro}" ||
+#             fail "failed to move root away from ${ROOTMNT} to ${root_ro}"
+#
+# but the initrd's mount is then klibc's, whose whole usage line is
+#     mount [-r] [-w] [-o options] [-t type] [-f] [-i] [-n] device directory
+# so `--move` is not an option it knows, and the call fails into the same silent
+# exit 0 and the same read-write root. util-linux's mount supports it, is already
+# in the rootfs (the `mount` package, which systemd depends on) and is the one
+# these scripts were written against.
+#
+# klibc's arrives through hooks/klibc-utils, which fills in every
+# /usr/lib/klibc/bin command not already in /bin. Declaring it a prerequisite puts
+# this hook after it, and copy_exec would not overwrite an existing destination
+# (copy_file returns early), so the klibc copy is deleted first. Nothing else
+# copies klibc commands, so it stays replaced. copy_exec's ldd pass brings the
+# libraries: libmount.so.1 is already in the initrd, libselinux is the addition.
+rm -f "${DESTDIR}/bin/mount" "${DESTDIR}/usr/bin/mount"
+copy_exec /bin/mount /bin

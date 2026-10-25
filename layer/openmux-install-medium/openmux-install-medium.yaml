@@ -6,8 +6,15 @@
 # X-Env-Layer-Desc: serial, blank root password, first-boot-wizard and
 # X-Env-Layer-Desc: auto-resize masks, and embedding the customer target
 # X-Env-Layer-Desc: image in /opt/openmux-installer/images. Applies to the
-# X-Env-Layer-Desc: USB install medium build only.
-# X-Env-Layer-Version: 1.1.0
+# X-Env-Layer-Desc: USB install medium build only. The medium's root
+# X-Env-Layer-Desc: filesystem is read-only BY DEFAULT (overlayroot=tmpfs,
+# X-Env-Layer-Desc: contributed as a kernel-cmdline fragment below), so nothing
+# X-Env-Layer-Desc: a factory session writes survives a reboot; menu option 8
+# X-Env-Layer-Desc: is the escape hatch out of that mode. In 1.3.0 the initrd
+# X-Env-Layer-Desc: also gets grep/sed and util-linux's mount, without which
+# X-Env-Layer-Desc: overlayroot silently boots read-write; a preimage hook
+# X-Env-Layer-Desc: asserts every half of it against the built artifacts.
+# X-Env-Layer-Version: 1.3.0
 # X-Env-Layer-Requires:
 # X-Env-VarPrefix: om
 #
@@ -20,6 +27,65 @@
 # X-Env-Var-target_image-Set: y
 # METAEND
 ---
+# --- read-only by default: the overlay root ---------------------------------
+# `openmux-install-medium.d/for/linux-base/cmdline.d/30-openmux-overlay` adds
+# `overlayroot=tmpfs` to the kernel command line: the initramfs then mounts
+# this stick's ext4 read-only at /media/root-ro and puts a tmpfs-backed
+# overlay on top of it as /. apt installs, `passwd`, hand edits, a regenerated
+# machine-id or SSH host keys and the journal therefore all evaporate on
+# reboot - which is the point: the same stick must present the same state to
+# the next console. Menu option 8 remains as the escape hatch (it clears the
+# token from cmdline.txt on the vfat partition, which is passed through and so
+# stays writable in either mode).
+#
+# Ordering: plan order, not fragment order. In the generated plan this layer
+# (31) sorts after rpi-device-base (29), which contributes the family defaults
+# including `root=ROOTDEV`, and well before image-rpios (40), which replaces
+# `root=` with the PARTUUID - so the shipped line ends up as
+#   fsck.repair=yes rootwait console=serial0,115200 overlayroot=tmpfs
+#   root=PARTUUID=xxxxxxxx-02
+# No `Requires:` is needed here because no other layer writes an
+# `overlayroot=` token: there is nothing for this one to win against.
+#
+# The fragment file itself must stay ONE line of tokens only - the engine's
+# apply_fragment dies on a second line, and a `#` would be appended to the
+# command line as a token (every file in a cmdline.d/ directory is a fragment,
+# so there is nowhere to comment beside it; hence this block).
+#
+# Deliberately kept OUT of that fragment:
+#   * `ro` - what makes the lower layer read-only is Debian's initramfs
+#     default `export readonly=y`, not `ro`. Adding `ro` sets overlayroot's
+#     cmdline_ro instead, which remounts the OVERLAY read-only: apt, `passwd`
+#     and the menu's EEPROM staging would then fail inside the session.
+#     Never add `ro` here - and never `rw`, which would drop the read-only
+#     lower layer entirely. om-verify.sh pins the absence of a bare `ro`.
+#   * `:recurse=0` - recursion only affects further block-device fstab
+#     entries, and this image's only other mount is /boot/firmware (vfat),
+#     which overlayroot passes through untouched as an unsupported
+#     filesystem. Replay of the shipped overlayrootify_fstab against this
+#     fstab with recurse=1 and recurse=0 gave byte-identical output.
+# The kernel command line outranks /etc/overlayroot.conf (conf-hooks.d/90-kernel
+# is the last config hook), so that file stays stock and overlayroot-chroot keeps
+# working as the way to look at a running stick's real root.
+#
+# Installing the overlayroot deb is necessary but NOT sufficient, and neither
+# shortfall is visible from the config: the symptom is an ordinary read-write boot
+# with overlayroot=tmpfs in /proc/cmdline and one FAIL line on serial, because
+# overlayroot's fail() ends in exit 0.
+#   * the initrd has no grep, so the driver probe - a grep of /proc/filesystems
+#     before and after modprobe -qb - can never succeed;
+#   * its mount is klibc's, which takes no long options, so the
+#     `mount --move "$ROOTMNT" "$root_ro"` that installs the read-only lower layer
+#     fails the same silent way.
+# .d/overlay/etc/initramfs-tools/hooks/openmux-overlayroot-tools supplies both
+# (three binaries plus util-linux's mount, instead of busybox for three call
+# sites) and hooks/late/postimage30-overlayroot-check asserts the result in the
+# finished boot.vfat: the one-line cmdline, then an lsinitramfs listing and an
+# unpack of the very initrd the firmware loads, since a name in a listing says
+# nothing about which implementation it is. Postimage only: linux-base assembles
+# the cmdline fragments from a late preimage hook and rpi-linux-base installs the
+# result, and both sort after this layer in the plan, so a preimage check can only
+# see - and reject - the template.
 mmdebstrap:
   packages:
     # The install menu's regenerate_disk_ids() shells out to sfdisk and only
@@ -82,9 +148,12 @@ mmdebstrap:
     # --- the install-menu package (medium only) --------------------------------
     # openmux-packages (shared) installs hardware + factory-tools; this layer
     # adds the 8-option factory menu, which execs from the autologin shell.
-    # Also pulls overlayroot from the distro repos: menu option 8 switches
-    # the rootfs to a read-only overlayroot=tmpfs at reboot, whose initramfs
-    # machinery comes from the overlayroot package.
+    # Also pulls overlayroot from the distro repos, which is what the default
+    # overlayroot=tmpfs (fragment above) depends on: the package's initramfs
+    # hook is what puts scripts/init-bottom/overlayroot INTO the initrd (the
+    # build must therefore see it before the initrd is generated), and it also
+    # ships overlayroot-chroot - the only way to look at the stick's real root
+    # while it is running read-only. Menu option 8 turns the mode off.
     - |
       set -eu
       mkdir -p "$1/tmp/openmux-pkgs"
