@@ -28,24 +28,39 @@
 # X-Env-Layer-Desc: (4) conf.d/10-openmux.conf pins the settings store to
 # X-Env-Layer-Desc: keyfile and leaves DNS with systemd-resolved, which this
 # X-Env-Layer-Desc: layer therefore requires: /etc/resolv.conf is resolved's
-# X-Env-Layer-Desc: stub symlink and NetworkManager must not take it over.
+# X-Env-Layer-Desc: stub symlink and NetworkManager must not take it over;
+# X-Env-Layer-Desc: (5) /etc/netplan/01-openmux.yaml is how wiring is
+# X-Env-Layer-Desc: configured: netplan states it, NetworkManager applies it.
+# X-Env-Layer-Desc: The file carries `renderer: NetworkManager` at network
+# X-Env-Layer-Desc: level because netplan(5) defaults the renderer to networkd,
+# X-Env-Layer-Desc: and a device left on that default gets nothing: netplan
+# X-Env-Layer-Desc: hands it to the masked daemon and tells udev
+# X-Env-Layer-Desc: NM_UNMANAGED=1, so NetworkManager keeps its hands off it
+# X-Env-Layer-Desc: too. netplan-generator is a systemd generator, so it runs on
+# X-Env-Layer-Desc: every boot and turns the file into
+# X-Env-Layer-Desc: /run/NetworkManager/system-connections/netplan-eth0.nmconnection
+# X-Env-Layer-Desc: ([ipv4] method=auto), which keyfile loads from /run; the
+# X-Env-Layer-Desc: image itself keeps no profile.
 # X-Env-Layer-Desc: wpa_supplicant is not installed and must stay out: it is a
 # X-Env-Layer-Desc: Recommends of network-manager, and Recommends are off
 # X-Env-Layer-Desc: build-wide (APT::Install-Recommends=false); iwd is the
 # X-Env-Layer-Desc: Wi-Fi Supplicant role and a second one on nl80211 would
 # X-Env-Layer-Desc: conflict with it. No DHCP client package is needed either -
 # X-Env-Layer-Desc: NetworkManager's internal client is the default.
-# X-Env-Layer-Desc: Connections are not baked: /var/lib/... is empty and
-# X-Env-Layer-Desc: /etc/NetworkManager/system-connections holds nothing until
-# X-Env-Layer-Desc: a connection is created at runtime (nmcli), as before.
+# X-Env-Layer-Desc: eth0 has no credentials to bake and gets its address from
+# X-Env-Layer-Desc: DHCP. Wi-Fi is not in netplan for the opposite reason -
+# X-Env-Layer-Desc: `wifis:` needs an SSID and a PSK - so wlan0 keeps taking
+# X-Env-Layer-Desc: connections created at runtime (nmcli) into
+# X-Env-Layer-Desc: /etc/NetworkManager/system-connections, as before.
 # X-Env-Layer-Version: 1.0.0
 # X-Env-Layer-Requires: network-manager-iwd,systemd-resolved
 # X-Env-Layer-Provides: openmux-network
 #
 # METAEND
 ---
-# Everything happens in ONE cleanup hook
-# (openmux-network.d/hooks/cleanup10-network-stack).
+# Two cleanup hooks (openmux-network.d/hooks/):
+# cleanup10-network-stack writes the state, cleanup20-netplan-render runs
+# netplan-generator and judges what it produced. Same phase, name order.
 #
 # Phase, not Requires, is what makes this layer's edits final. runner feeds
 # every plan layer into a single bdebstrap run, whose phases are strictly
@@ -73,13 +88,28 @@
 # 1.52.1-1+rpt4 rather than Debian's 1.52.1-1. That build adds a hard
 # `Depends: netplan.io`, which is where netplan.io, libnetplan1,
 # python3-netplan/-yaml, iproute2 and ethtool come from (32 packages over the
-# systemd-networkd stack, none of them removed from it). netplan is an inert
-# observer here: /etc/netplan ships empty, so netplan-generator generates nothing
-# and the keyfile store remains the only source of connections. A .yaml naming
-# `renderer: networkd` would be a route back to the masked daemon, which is why
-# om-verify.sh asserts the directory stays empty rather than assuming it.
+# systemd-networkd stack, none of them removed from it). netplan is therefore in
+# the image whatever the config interface is, so using it as that interface costs
+# nothing to maintain: a wired configuration is one YAML file plus `netplan
+# apply`, instead of a device-specific nmcli invocation whose result lives in a
+# file no one looks at. What keeps netplan from being a second network manager is
+# the renderer: with `renderer: NetworkManager` it writes keyfile profiles into
+# /run and stops there, and it only talks to networkd without that key
+# (netplan(5): the renderer "Defaults to networkd if not defined"). Because it
+# defaults the wrong way for this image, the pin is asserted twice:
+# cleanup20-netplan-render runs the generator at build time - which is also the
+# only way to know how several files merge - and om-verify.sh pins the key on the
+# finished image.
+#
+# The masks stay necessary with netplan in use, not despite it. A file naming
+# `renderer: networkd` is legal, and the default is networkd for anything the
+# global pin does not cover, so the masks are what turn that mistake into
+# "nothing configures this interface" instead of two daemons running one DHCP
+# client each on the same link.
 #
 # Deliberately NOT done here:
+#   * `wifis:` in netplan. The renderer supports it, but an access point needs a
+#     PSK, so a netplan Wi-Fi configuration means a shipped credential.
 #   * masking NetworkManager-wait-online.service. `systemctl enable NetworkManager`
 #     links it into network-online.target.wants through its [Install] Also=, and
 #     the hook drops that link instead: a masked unit that something still wants

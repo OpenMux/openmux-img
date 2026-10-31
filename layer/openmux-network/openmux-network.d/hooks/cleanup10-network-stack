@@ -55,6 +55,61 @@ plugins=keyfile
 dns=systemd-resolved
 EOF
 
+# --- netplan is the configuration interface --------------------------------
+# NetworkManager is the renderer; the addressing itself is declared here, in
+# netplan, so `netplan apply`/`netplan diff` and one YAML file are the operator's
+# interface. netplan-generator is a SYSTEMD GENERATOR, so it runs on every boot
+# whether or not any netplan unit is enabled, and writes
+# /run/NetworkManager/system-connections/netplan-eth0.nmconnection
+# (`[connection] type=ethernet interface-name=eth0`, `[ipv4] method=auto`).
+# keyfile reads connections from /run (nm-settings-keyfile(5)), so nothing
+# lands in /etc/NetworkManager/system-connections and the image still ships no
+# user-created profile.
+#
+# `renderer: NetworkManager` sits at network level rather than under eth0 because
+# netplan(5) states the key "Defaults to networkd if not defined", and a device
+# left on that default ends up with no configuration at all: netplan hands it to
+# networkd (masked here) and tells udev `NM_UNMANAGED="1"` for it, so NetworkManager
+# would keep its hands off an interface nothing else brings up either. Written
+# globally it is inherited: netplan merges the files in this directory (per key,
+# lexically later file wins) while the merged document keeps this renderer, so a
+# site file that re-declares eth0 without repeating the key stays on
+# NetworkManager. Only a file that names `renderer: networkd` itself overrides
+# this - hence cleanup20-netplan-render, which runs the generator.
+#
+# 0600 because netplan warns "Permissions for <file> are too open" otherwise, and
+# the warning comes from the generator: it would then be in the journal of every
+# device at every boot.
+install -d -m 0755 "$ROOT/etc/netplan"
+cat > "$ROOT/etc/netplan/01-openmux.yaml" <<'EOF'
+# OpenMux: netplan describes the configuration, NetworkManager applies it.
+# Override this with another file in this directory (netplan merges them; per
+# key, the lexically later file wins) and apply it with `netplan apply`.
+# Keep NetworkManager reachable as the renderer: netplan defaults to
+# systemd-networkd, and this image masks systemd-networkd.
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    eth0:
+      dhcp4: true
+EOF
+chmod 600 "$ROOT/etc/netplan/01-openmux.yaml"
+
+# eth0 only, on purpose. Wi-Fi cannot be expressed here without an SSID and a
+# PSK, and credentials do not belong in a shipped image, so wlan0 stays with
+# NetworkManager + iwd and the connections created at runtime. IPv6 likewise:
+# with the NM renderer, netplan writes `[ipv6] method=ignore` unless a file asks
+# for dhcp6 or an address, so IPv6 is off until someone adds `dhcp6: true`.
+
+# Checked rather than trusted: a file that lost its renderer line, or its mode,
+# still looks correct in a listing.
+np="$ROOT/etc/netplan/01-openmux.yaml"
+grep -qx '  renderer: NetworkManager' "$np" 2>/dev/null ||
+   fail "$np does not pin renderer: NetworkManager - without it netplan defaults to networkd"
+[ "$(stat -c '%a' "$np" 2>/dev/null)" = 600 ] ||
+   fail "$np is not mode 600 - netplan would warn on every boot"
+
 # --- no unit may block the boot on "link is up" ----------------------------
 # `systemctl enable NetworkManager` links NetworkManager-wait-online.service into
 # network-online.target.wants through its [Install] Also=, with a 60 s timeout
@@ -75,6 +130,12 @@ rm -f "$ROOT/etc/systemd/system/network-online.target.wants/NetworkManager-wait-
 # Written by rpi-device-base's customize hook ($LAYER_HOOKS/systemd/netgen),
 # which is why this runs in cleanup rather than in a customize hook ordered by a
 # Requires edge: the files have to be gone after it, not before it.
+#
+# They are not netplan input: /etc/systemd/network is systemd-networkd's own
+# config source, read by the daemon directly, so the netplan file above does not
+# supersede them. Left behind, the image carries two disagreeing descriptions of
+# the same interfaces, and anything that gets networkd running again gives it an
+# eth0 of its own - with its own DHCP client - next to NetworkManager's.
 rm -f "$ROOT/etc/systemd/network/01-eth0.network"
 rm -f "$ROOT/etc/systemd/network/02-wlan0.network"
 
@@ -131,6 +192,12 @@ done
 # the driver's own names, eth0 and wlan0. Losing them is not loud either: this
 # image names no interface anywhere, so what notices is a connection created
 # with ifname=wlan0, or an operator typing a device name that is not there.
+#
+# With netplan in use the names are load-bearing in a new way: the netplan file
+# keys the interface as `eth0`, and the profile netplan generates carries
+# `interface-name=eth0` plus a udev match on ID_NET_NAME=="eth0". If udev renamed
+# the port to enp0s..., netplan would describe a device that is not there and the
+# wired interface would come up with no address and no complaint.
 install -d -m 0755 "$ROOT/etc/systemd/network"
 ln -sfn /dev/null "$ROOT/etc/systemd/network/99-default.link"
 ln -sfn /dev/null "$ROOT/etc/systemd/network/73-usb-net-by-mac.link"

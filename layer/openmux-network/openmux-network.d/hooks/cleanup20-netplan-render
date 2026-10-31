@@ -1,0 +1,98 @@
+#!/bin/sh
+# Does the netplan configuration in this image actually reach NetworkManager?
+#
+# cleanup10-network-stack writes /etc/netplan/01-openmux.yaml with
+# `renderer: NetworkManager`, and that pin is the whole design: openmux-network
+# puts addressing in netplan and lets only NetworkManager apply it. The pin is
+# also the only fragile part, because netplan(5) says the renderer key
+# "Defaults to networkd if not defined" - a device that ends up on the default is
+# handed to the masked daemon while netplan tells udev `NM_UNMANAGED="1"` for it,
+# so neither daemon brings the link up and nothing is wrong at build time. That
+# failure needs the next boot to show, so it is not left to the next boot.
+#
+# netplan-generator is run here, for real, and its output is read. Running it is
+# the only way to ask the question, because the answer depends on how several
+# files merge, and that is decided by netplan, not by this repo.
+#
+# cleanup phase, after cleanup10 in the same layer (hooks run in name order): it
+# judges what cleanup10 wrote. /bin/sh like every runner hook here, because the
+# shell behind /bin/sh has no arrays.
+set -eu
+
+ROOT="${1:?usage: cleanup20-netplan-render <chroot-dir>}"
+
+fail() { printf 'openmux-network: %s\n' "$1" >&2; exit 1; }
+
+# The path varies by distribution (/usr/bin, /usr/sbin), and a hook that assumed
+# one would report a missing file instead of the missing tool.
+CHROOT=$(command -v chroot) || fail "chroot is not on PATH in the build container"
+
+GEN=usr/libexec/netplan/generate
+[ -x "$ROOT/$GEN" ] ||
+   fail "$ROOT/$GEN is not executable - netplan.io ships the generator and is a hard dependency of the Raspberry Pi build of network-manager, so this is a package-set problem, not a netplan problem"
+[ -d "$ROOT/etc/netplan" ] ||
+   fail "$ROOT/etc/netplan does not exist - cleanup10-network-stack writes the file this hook judges"
+
+# Run the generator against a scratch tree, never against the image's own root:
+# everything it produces goes into <root>/run, and /run is the booted system's
+# tmpfs - leaving generated files in the captured image would ship a /run that
+# describes a boot that has not happened. `-r` also selects which netplan
+# directory is read, so the copy of etc/netplan below is what is judged, and the
+# real /etc stays untouched either way.
+SCRATCH=/tmp/openmux-netplan-check
+# Both scratch files go away with this hook on every path, not only the success
+# path: /tmp is inside the image, so a tree left behind by a failing run is a tree
+# the same build's later phases would capture. The trap is installed after
+# SCRATCH is assigned, so it can never expand to an empty path.
+LOG=$(mktemp)
+trap 'rm -rf "$ROOT$SCRATCH"; rm -f "${LOG:-}"' EXIT HUP INT TERM
+rm -rf "$ROOT$SCRATCH"
+mkdir -p "$ROOT$SCRATCH/etc"
+cp -a "$ROOT/etc/netplan" "$ROOT$SCRATCH/etc/"
+# cp -a keeps the 0600 the shipped file is written with. Without it this run
+# would emit netplan's "Permissions ... are too open" warning and the verdict
+# would be about the copy rather than about the image.
+
+# The log lives outside the image on purpose: inside, it would be a file the
+# image captures; and a relative path would land in the build container's
+# working directory, which is not the root being judged.
+"$CHROOT" "$ROOT" "$GEN" -r "$SCRATCH" >"$LOG" 2>&1 && gen_rc=0 || gen_rc=$?
+if [ -s "$LOG" ]; then
+   sed 's/^/openmux-network: netplan generate: /' "$LOG" >&2
+fi
+[ "$gen_rc" = 0 ] ||
+   fail "netplan generate exited $gen_rc against this image's /etc/netplan - the config does not parse, so no daemon would configure anything at boot"
+
+out="$ROOT$SCRATCH/run"
+gen_network=$(find "$out/systemd/network" -name '*.network' 2>/dev/null | LC_ALL=C sort)
+if [ -n "$gen_network" ]; then
+   fail "netplan generated systemd-networkd config, so the renderer is not NetworkManager for: $(printf '%s' "$gen_network" | sed "s|$ROOT$SCRATCH||" | tr '\n' ' ') (this image masks networkd, so those interfaces would get no address at all)"
+fi
+
+rules="$out/udev/rules.d/90-netplan.rules"
+if grep -q 'NM_UNMANAGED="1"' "$rules" 2>/dev/null; then
+   fail "netplan told udev to make a device unmanaged: $(grep 'NM_UNMANAGED="1"' "$rules" | tr '\n' ' ') - NetworkManager would be forbidden from configuring it"
+fi
+
+profile="$out/NetworkManager/system-connections/netplan-eth0.nmconnection"
+[ -f "$profile" ] || {
+   got=$(find "$out/NetworkManager/system-connections" -name '*.nmconnection' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
+   fail "netplan wrote no NetworkManager profile for eth0 (it wrote: ${got:-nothing}); the address of eth0 depends on it"
+}
+# The two properties the image promises about its wired port, as netplan stated
+# them to the renderer: the profile is about eth0 by name, and it requests its
+# address rather than assigning one.
+[ "$(grep -x 'interface-name=eth0' "$profile" | head -n1)" = "interface-name=eth0" ] ||
+   fail "the generated eth0 profile does not name the interface: $(tr '\n' ' ' < "$profile")"
+[ "$(grep -x 'method=auto' "$profile" | head -n1)" = "method=auto" ] ||
+   fail "the generated eth0 profile does not request its address over DHCP: $(tr '\n' ' ' < "$profile")"
+
+printf 'openmux-network: netplan renders into NetworkManager: %s\n' \
+   "${profile#$ROOT$SCRATCH}" >&2
+
+# /tmp is inside the image, so the scratch tree must not survive this hook.
+rm -rf "$ROOT$SCRATCH"
+[ ! -e "$ROOT$SCRATCH" ] ||
+   fail "$ROOT$SCRATCH could not be removed; it would be captured into the image"
+
+exit 0

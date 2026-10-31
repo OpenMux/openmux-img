@@ -91,11 +91,16 @@ layer/
                             naming them is the only way to choose
   openmux-network/          NetworkManager + iwd as the only network manager:
                             conf.d (keyfile store, DNS left with resolved),
-                            systemd-networkd masked, its generated .network files
-                            removed, the udev null-.link pair re-owned (that is
-                            what keeps eth0/wlan0); one cleanup hook, which runs
-                            after EVERY layer's customize hooks, so nothing here
-                            depends on plan order
+                            /etc/netplan/01-openmux.yaml as the wired config
+                            surface (renderer pinned to NetworkManager because
+                            netplan's default is networkd), systemd-networkd
+                            masked, its generated .network files removed, the
+                            udev null-.link pair re-owned (that keeps eth0/wlan0 -
+                            and netplan keys eth0 by that name). Two cleanup hooks:
+                            one writes the state, the other runs netplan-generator
+                            for real and fails the build unless its verdict is an
+                            NM profile. Cleanup runs after EVERY layer's customize
+                            hooks, so nothing here depends on plan order
   openmux-serial-console/   CM5 serial console: cmdline.d fragment (serial
                             console FIRST, tty1 kept) + config.txt append
                             (uart0/dtparam routing for the 40-pin PL011); login
@@ -150,7 +155,20 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   `.network` files generated for it are removed, and its `wait-online` unit -
   plus NetworkManager's own, which `enable` pulls in through `Also=` - has no
   route into the boot. `wpa_supplicant` and every DHCP-client package stay
-  absent because Recommends are off build-wide.
+  absent because Recommends are off build-wide (NM's internal DHCP client is
+  the default, so wired DHCP needs no package).
+- Wired addressing is CONFIGURED IN NETPLAN but rendered by NetworkManager:
+  `/etc/netplan/01-openmux.yaml` declares `eth0: dhcp4: true` with
+  `renderer: NetworkManager` at network level, so the operator interface is one
+  YAML file plus `netplan apply`. netplan-generator is a systemd generator - it
+  runs every boot regardless of enabled units - and writes the resulting profile
+  under /run, which keyfile loads: nothing lands in
+  /etc/NetworkManager/system-connections. The renderer key is load-bearing:
+  netplan defaults it to networkd, and a device left on that default gets no
+  address at all (unmanaged for NM, masked daemon), so a build-time hook runs
+  the real generator and fails the build unless the output is an NM profile.
+  Wi-Fi is deliberately absent from netplan: `wifis:` needs a PSK, images ship
+  no credentials - runtime nmcli + iwd as before.
 - The device layer is the engine's built-in `rpi-cm5` (`device.layer:
   rpi-cm5`; `class: cm5`).
 - The target's primary account uses the engine's native `user1` variables

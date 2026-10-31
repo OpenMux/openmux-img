@@ -62,9 +62,11 @@ is_wanted() { # is_wanted <root> <target> <unit>  - enabled = a .wants symlink.
 # image. File state is the only thing observable without booting, and the two
 # halves have to be checked together: a unit that is masked but still wanted by a
 # target is a failed dependency job on every boot, and a unit that is neither
-# enabled nor masked is a daemon nobody started.
+# enabled nor masked is a daemon nobody started. The three pieces of the design
+# are checked as a set: netplan states the configuration, the renderer key hands
+# it to NetworkManager, and the masks keep systemd-networkd out of the bargain.
 network_stack() { # network_stack <root> <label>
-  local r=$1 t=$2 u p left netplan_files
+  local r=$1 t=$2 u p left renderers
   echo "  -- network stack: NetworkManager, networkd retired ($t)"
   [ -x "$r/usr/sbin/NetworkManager" ] && ok "$t: NetworkManager installed" \
     || bad "$t: /usr/sbin/NetworkManager missing"
@@ -111,16 +113,37 @@ network_stack() { # network_stack <root> <label>
   [ "$(readlink "$r/etc/resolv.conf" 2>/dev/null)" = "../run/systemd/resolve/stub-resolv.conf" ] \
     && ok "$t: /etc/resolv.conf is the resolved stub" \
     || bad "$t: /etc/resolv.conf is not the resolved stub ($(readlink "$r/etc/resolv.conf" 2>/dev/null || echo 'not a symlink'))"
-  # netplan.io is installed because the Raspberry Pi build of network-manager
-  # Depends on it (Debian's does not). It stays an inert observer only while
-  # /etc/netplan holds no file: netplan_generate() reads *.yaml AND *.yml, feeds
-  # them to whichever `renderer:` names, and a file naming Networkd is a route back
-  # to the masked daemon; one naming NetworkManager moves connection storage away
-  # from the keyfile store. Both extensions therefore have to stay absent.
-  netplan_files=$(ls "$r"/etc/netplan/*.yaml "$r"/etc/netplan/*.yml 2>/dev/null | tr '\n' ' ')
-  [ -z "$netplan_files" ] \
-    && ok "$t: /etc/netplan holds no file (keyfile stays the only connection source)" \
-    || bad "$t: /etc/netplan would be rendered: $netplan_files"
+  # Wiring is configured in netplan and rendered by NetworkManager, so this file
+  # is load-bearing: if it is absent, or is not rendered by NM, nothing configures
+  # eth0. netplan's own default renderer is the wrong one here - netplan(5): the
+  # renderer "Defaults to networkd if not defined" - and a device left on the
+  # default gets nothing at all, because netplan hands it to the masked daemon and
+  # writes NM_UNMANAGED="1" for it so NetworkManager is told to keep off it too.
+  # The layer's cleanup20-netplan-render runs the generator and proves the
+  # renderer at build time; what is pinned here is the shipped text:
+  #   * netplan.io present. It is a Depends of the Raspberry Pi build of
+  #     network-manager, not of ours, so a future upstream change could drop it
+  #     and leave these files as decoration;
+  #   * every renderer key in the directory says NetworkManager, comments
+  #     stripped: netplan merges files per key, so one naming networkd defeats a
+  #     correct pin in another file;
+  #   * mode 0600. netplan(5) asks for it and warns otherwise, and the warning
+  #     comes from a generator that runs on every boot, so it would sit in the
+  #     journal of every device forever.
+  is_absent "$r/var/lib/dpkg/info/netplan.io.list" \
+    && bad "$t: netplan.io is not installed, so /etc/netplan renders into nothing" \
+    || ok "$t: netplan.io installed (it is what turns the YAML into a profile)"
+  chk "$t: eth0 declared in netplan"        "$r/etc/netplan/01-openmux.yaml" '^[[:space:]]{4}eth0:$'
+  chk "$t: eth0 takes its address from DHCP" "$r/etc/netplan/01-openmux.yaml" '^[[:space:]]{6}dhcp4:[[:space:]]*true$'
+  [ "$(stat -c '%a' "$r/etc/netplan/01-openmux.yaml" 2>/dev/null)" = 600 ] \
+    && ok "$t: the netplan file is 0600 (netplan warns at boot on any looser mode)" \
+    || bad "$t: /etc/netplan/01-openmux.yaml is not mode 600"
+  renderers=$(cat "$r"/etc/netplan/*.yaml "$r"/etc/netplan/*.yml 2>/dev/null \
+                | sed 's/#.*//' | grep -Eo '^[[:space:]]*renderer:.*' \
+                | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C sort -u)
+  [ "$renderers" = "NetworkManager" ] \
+    && ok "$t: every netplan renderer key is NetworkManager" \
+    || bad "$t: netplan renderer keys are [$(printf '%s' "$renderers" | tr '\n' ' ')], want NetworkManager and nothing else"
   # Recommends are off build-wide (APT::Install-Recommends=false), which is what
   # keeps a second supplicant, a second DHCP client and the captive-portal helper
   # out of the image. Pinned because they are Recommends of network-manager: one
