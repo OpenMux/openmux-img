@@ -1,0 +1,144 @@
+#!/bin/sh
+# Final network state of an OpenMux image: NetworkManager decides, everything
+# else is switched off.  /bin/sh, as in every runner hook here: the engine runs
+# layer hook files directly, and the shell behind /bin/sh has no arrays.
+#
+# cleanup phase on purpose. All of this is one bdebstrap run: setup, packages,
+# then every plan layer's customize hooks in plan order, then every plan layer's
+# cleanup hooks. Anything here therefore runs after the layer that generates
+# networkd's .network files (rpi-device-base) and after whoever enabled what,
+# so the result does not depend on where this layer lands in the plan.
+set -eu
+
+ROOT="${1:?usage: cleanup10-network-stack <chroot-dir>}"
+
+fail() { printf 'openmux-network: %s\n' "$1" >&2; exit 1; }
+
+# --- the stack being switched TO has to exist ------------------------------
+# Both checks guard a silent failure. enable-units reports "Unit ... not found.
+# Skipping" and exits 0; skipping it here would leave the image with no network
+# manager at all, because networkd is removed below. wifi.backend likewise:
+# wpa_supplicant is not installed (Recommends are off build-wide), so an absent
+# iwd backend leaves WPA with no mechanism behind it on every boot; an image that
+# cannot associate a WPA network is only detectable by booting it.
+#
+# -x on a real path and -L on the wants entry, never -e on the wants entry: a
+# wants symlink points at an ABSOLUTE in-chroot path (/usr/lib/systemd/system/…)
+# and this hook runs outside the chroot, where that path means the build
+# container's own systemd - -e there answers about the container, not the image.
+[ -x "$ROOT/usr/sbin/NetworkManager" ] ||
+   fail "$ROOT/usr/sbin/NetworkManager is not installed - network-manager is a Requires-level layer of openmux-network, so its package is missing for a reason unrelated to this hook"
+
+[ -L "$ROOT/etc/systemd/system/multi-user.target.wants/NetworkManager.service" ] ||
+   fail "NetworkManager.service is not enabled in $ROOT - the network-manager layer's enable-units step skipped it, and retiring systemd-networkd on top of that would leave the image with no network manager"
+
+grep -qx 'wifi.backend=iwd' "$ROOT/etc/NetworkManager/conf.d/iwd.conf" 2>/dev/null ||
+   fail "$ROOT/etc/NetworkManager/conf.d/iwd.conf does not set wifi.backend=iwd - without iwd (or wpa_supplicant, which is not installed) NetworkManager has no Wi-Fi Supplicant"
+
+# --- NetworkManager settings -----------------------------------------------
+# conf.d, never /etc/NetworkManager/NetworkManager.conf: that file is a conffile
+# and editing it turns every future package update into a conffile prompt in a
+# non-interactive image.
+install -d -m 0755 "$ROOT/etc/NetworkManager/conf.d"
+cat > "$ROOT/etc/NetworkManager/conf.d/10-openmux.conf" <<'EOF'
+# Written by the openmux-network image layer. Configured connections live in
+# /etc/NetworkManager/system-connections (0600, one file per connection);
+# nothing is baked into the image.
+
+[main]
+# The distro conffile loads the ifupdown plugin too, and ifupdown is not
+# installed here: keyfile is the only settings store this image has.
+plugins=keyfile
+# DNS stays with systemd-resolved, which /etc/resolv.conf points at as its
+# stub. NetworkManager writing resolv.conf itself would leave that symlink
+# pointing at a stub nothing feeds.
+dns=systemd-resolved
+EOF
+
+# --- no unit may block the boot on "link is up" ----------------------------
+# `systemctl enable NetworkManager` links NetworkManager-wait-online.service into
+# network-online.target.wants through its [Install] Also=, with a 60 s timeout
+# (NM_ONLINE_TIMEOUT). Normal boot is unaffected because nothing on this image
+# pulls network-online.target from /etc; the one unit that does is
+# rescue-ssh.target, shipped in /usr/lib, and that is exactly where a headless
+# device with no cable in the port should not lose a minute. With the wants entry
+# gone, network-online.target is reached at once and rescue SSH starts
+# immediately, with NetworkManager finishing addressing in the background.
+#
+# Not masked: a masked unit that something still Wants= is a failed dependency
+# job, and a package upgrade that re-runs enable restores this entry, so the mask
+# would trade a bounded delay for boot-time noise. Dropping the symlink is
+# idempotent, and om-verify.sh checks it stayed dropped.
+rm -f "$ROOT/etc/systemd/system/network-online.target.wants/NetworkManager-wait-online.service"
+
+# --- networkd's interfaces go back unconfigured ----------------------------
+# Written by rpi-device-base's customize hook ($LAYER_HOOKS/systemd/netgen),
+# which is why this runs in cleanup rather than in a customize hook ordered by a
+# Requires edge: the files have to be gone after it, not before it.
+rm -f "$ROOT/etc/systemd/network/01-eth0.network"
+rm -f "$ROOT/etc/systemd/network/02-wlan0.network"
+
+# --- switch systemd-networkd off, durably ----------------------------------
+# Disabling is not enough: the systemd package ships
+# /usr/lib/systemd/system-preset/90-systemd.preset with "enable
+# systemd-networkd.service", "-wait-online" and "-network-generator" (which is
+# also how systemd-pstore.service ends up enabled in this image with no layer
+# asking for it), and networkd's own [Install] pulls its socket, waiter and
+# generator along through Also=. Masking is the only state that survives all of
+# that, plus D-Bus activation on dbus-org.freedesktop.network1.service.
+# Unit names, split on spaces below - no globbing and no spaces in a unit name.
+networkd_units='systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service systemd-network-generator.service dbus-org.freedesktop.network1.service'
+
+# Mask = a symlink in /etc/systemd/system to /dev/null, which is exactly what
+# `systemctl mask` creates ("Created symlink '/etc/systemd/system/x' ->
+# '/dev/null'"), written here directly so the hook needs nothing from the
+# chroot: no systemctl, and therefore no /proc or D-Bus assumption about a
+# phase whose mounts belong to mmdebstrap rather than to this layer.
+#
+# The enable/preset symlinks go first. Masking alone leaves a
+# multi-user.target.wants entry pointing at a masked unit, which systemd turns
+# into a failed dependency job on every boot: correct, but it prints on the
+# serial console of a device that has nothing else to print. In
+# /etc/systemd/system itself the mask does displace what is there, which is what
+# removes the dbus-org.freedesktop.network1.service alias enabling bus activation.
+for unit in $networkd_units; do
+   rm -f "$ROOT"/etc/systemd/system/*.wants/"$unit"
+   ln -sfn /dev/null "$ROOT/etc/systemd/system/$unit"
+done
+
+# Checked rather than trusted: every one of these edits is a no-op if a path
+# moves, and a no-op here is an image where two daemons answer for one link.
+for unit in $networkd_units; do
+   state=$(readlink "$ROOT/etc/systemd/system/$unit" 2>/dev/null || true)
+   [ "$state" = /dev/null ] ||
+      fail "masking $unit did not take: $ROOT/etc/systemd/system/$unit points at '${state:-nothing}'"
+   wanted=$(ls "$ROOT"/etc/systemd/system/*.wants/"$unit" 2>/dev/null || true)
+   [ -z "$wanted" ] ||
+      fail "$unit is still wanted by $wanted"
+done
+
+# --- interface names stay the kernel's -------------------------------------
+# Naming on this image is decided by udev, not by the kernel alone: no
+# net.ifnames=0 reaches the kernel cmdline (cmdline.txt is assembled from the
+# preimage cmdline.d fragments and none of them carries a naming option), so
+# these two null .link files are what stop udev renaming: 99-default.link's
+# NamePolicy names otherwise, and enx<mac> for USB NICs via
+# 73-usb-net-by-mac.link.
+#
+# They are systemd.link(5) input and are applied by systemd-udevd, so retiring
+# networkd does not retire them - but their previous owner, the systemd-net-min
+# layer, is gone with networkd, so this layer owns them now. Masked, udev leaves
+# the driver's own names, eth0 and wlan0. Losing them is not loud either: this
+# image names no interface anywhere, so what notices is a connection created
+# with ifname=wlan0, or an operator typing a device name that is not there.
+install -d -m 0755 "$ROOT/etc/systemd/network"
+ln -sfn /dev/null "$ROOT/etc/systemd/network/99-default.link"
+ln -sfn /dev/null "$ROOT/etc/systemd/network/73-usb-net-by-mac.link"
+
+for link in 99-default.link 73-usb-net-by-mac.link; do
+   state=$(readlink "$ROOT/etc/systemd/network/$link" 2>/dev/null || true)
+   [ "$state" = /dev/null ] ||
+      fail "$ROOT/etc/systemd/network/$link points at '${state:-nothing}', not /dev/null"
+done
+
+exit 0

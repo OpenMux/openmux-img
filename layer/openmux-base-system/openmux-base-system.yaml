@@ -1,0 +1,91 @@
+# METABEGIN
+# X-Env-Layer-Name: openmux-base-system
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: The OpenMux base system, listed out: the Debian trixie
+# X-Env-Layer-Desc: rootfs, the Raspberry Pi apt and utility layers, systemd,
+# X-Env-Layer-Desc: resolved, timesyncd, ssh and the OpenMux network stack.
+# X-Env-Layer-Desc: Content-wise this is the engine's trixie-minbase suite
+# X-Env-Layer-Desc: layer with systemd-net-min replaced by openmux-network
+# X-Env-Layer-Desc: (NetworkManager + iwd). It is spelled out here rather than
+# X-Env-Layer-Desc: inherited because a suite layer names its providers, and a
+# X-Env-Layer-Desc: build that inherits it cannot disagree: RequiresProvider
+# X-Env-Layer-Desc: only checks that some layer provides a token, so it never
+# X-Env-Layer-Desc: selects between providers and never reports an ambiguity -
+# X-Env-Layer-Desc: the only way to choose is to require the provider by name.
+# X-Env-Layer-Desc: trixie-minbase requires systemd-net-min by name, so any
+# X-Env-Layer-Desc: other network manager means not selecting it, and not
+# X-Env-Layer-Desc: selecting it is the same as writing its list down once,
+# X-Env-Layer-Desc: here. Forking the layer under its own name at a higher
+# X-Env-Layer-Desc: version is the alternative: it would shadow a file inside
+# X-Env-Layer-Desc: the pinned generator and hide the difference from anyone
+# X-Env-Layer-Desc: reading the engine.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: debian-trixie-arm64-multi,
+#  rpi-debian-trixie,
+#  rpi-misc-utils,
+#  rpi-essential-base,
+#  rpi-misc-skel,
+#  systemd-min,
+#  openmux-network,
+#  openssh-server,
+#  systemd-timesyncd,
+#  wireless-regulatory
+# X-Env-Layer-Provides: openmux-base-system
+#
+# METAEND
+---
+# Members, and what each one is doing here (the Requires list is the whole
+# system; there is no mmdebstrap body, so nothing in this layer installs or
+# edits a file itself):
+#
+#   debian-trixie-arm64-multi  the rootfs: mmdebstrap variant with apt and
+#                              arm64+armhf foreign arch. Not a smaller variant:
+#                              openmux-packages installs the OpenMux .deb files
+#                              by running apt-get inside the chroot, so the base
+#                              has to ship apt (the variant=custom bases, e.g.
+#                              debian-trixie-arm64-slim, do not).
+#   rpi-debian-trixie          the Raspberry Pi apt source for trixie plus
+#                              raspberrypi-archive-keyring: the suite the
+#                              kernel, firmware and Raspberry Pi's own packages
+#                              are downloaded from.
+#   rpi-essential-base         cryptsetup, e2fsprogs, zstd and the diagnostics
+#                              set (wget, net-tools, iputils-ping, procps,
+#                              nano). e2fsprogs is load-bearing:
+#                              openmux-extend-filesystem resizes the root
+#                              filesystem with resize2fs.
+#   rpi-misc-utils             raspi-config, raspi-utils(-core, -dt) and
+#                              flashrom. Also load-bearing: vcgencmd comes from
+#                              raspi-utils-core and the install menu calls it
+#                              (it reads config.txt itself rather than going
+#                              through raspi-config, which is an interactive
+#                              curses UI).
+#   rpi-misc-skel              writes /etc/hosts, with 127.0.1.1 pointing at
+#                              device.hostname, and declares that variable in
+#                              X-Env-VarRequires - which both openmux configs
+#                              set.
+#   systemd-min                systemd + systemd-sysv; provides the `systemd`
+#                              token. Explicit by name: rpi-essential-base and
+#                              friends only assert that SOME provider exists,
+#                              and asserting is not selecting. Also the layer
+#                              whose preset file makes the networkd units
+#                              enabled unless something masks them - see
+#                              layer/openmux-network.
+#   openmux-network            NetworkManager + iwd, plus systemd-resolved,
+#                              which its conf.d file names as the DNS backend -
+#                              see layer/openmux-network.
+#   openssh-server             sshd + first-boot host key generation. Also
+#                              brings device-user-admin, the layer that turns
+#                              device.user1 into an account.
+#   systemd-timesyncd          NTP client (the `time-daemon` token provider;
+#                              chrony-systemd is the alternative and is not
+#                              selected).
+#   wireless-regulatory        wireless-regdb + the cfg80211 regdomain module
+#                              option; provides the `wireless-regdb` token that
+#                              iwd and network-manager list in RequiresProvider.
+#
+# Not here, deliberately:
+#   systemd-net-min   systemd-networkd + systemd-resolved as a pair. Its
+#                     networkd half is what openmux-network exists to retire;
+#                     its resolved half arrives through openmux-network.
+#   iwd               a Wi-Fi backend is only meaningful next to a manager: it
+#                     is openmux-network's requirement, not the base's.

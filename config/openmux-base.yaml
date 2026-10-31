@@ -22,12 +22,17 @@
 # layer adds its `root=ROOTDEV` token, or the literal ROOTDEV survives into
 # cmdline.txt and the image cannot boot.
 
-# Debian trixie (Debian 13) multiarch-minimum base for Raspberry Pi arm64:
-# systemd-min + systemd-timesyncd + openssh-server + the rpi
-# device/firmware/skel layers, ...  (see layer/suite/debian/trixie-minbase.yaml
-# in the generator - the same base the stock config/trixie-minbase.yaml uses).
+# The base system, composed in this repo rather than inherited from the
+# engine's `trixie-minbase` suite layer: the same Debian trixie rootfs, apt
+# suite, kernel/utility layers, systemd, resolved, timesyncd and ssh, with the
+# network manager chosen by name - NetworkManager with iwd behind it, and
+# systemd-networkd masked. See layer/openmux-base-system for what each member
+# is for and layer/openmux-network for what makes the choice exclusive; the
+# reason the list lives here at all is that `RequiresProvider` never selects a
+# provider between contenders, so whatever a suite layer names is what a build
+# gets.
 layer:
-  base: trixie-minbase
+  base: openmux-base-system
   # Both the target image and the install medium need the CM5 40-pin UART
   # console (their only debug/login channel), so it is shared here under its
   # own key (no concrete image reuses `serial`).

@@ -11,8 +11,13 @@
 #
 # $SPEC is the build spec's directory (used to cross-check the admin SSH key
 # from keys/admin.pub when the spec used key_file). The admin account is
-# located dynamically as the uid-1000 user, so any buildspec works; the
-# "qa1" expectations below match the fixture in /tmp/om-buildspec-test.
+# located dynamically as the uid-1000 user, so any buildspec works. A few
+# expectations below come from what a spec may ASK for rather than from what an
+# image must always have, so they are opt-out with the spec in hand:
+#   EXPECT_SSH_KEY=0       spec sets neither ssh_key nor key_file
+#   EXPECT_POST_INSTALL=0  spec leaves post_install out (no /usr/local/openmux marker)
+#   EXPECT_ADD_PKGS=       spec leaves additional_packages out (the fixture used curl git)
+#   EXPECT_QA1=0           spec has no `qa1` in additional_accounts
 set -u
 
 DIST="${DIST:-/src/dist}"
@@ -38,6 +43,92 @@ chk() { # chk <desc> <file> <egrep pattern>
 }
 chk_not() { # chk_not <desc> <file> <egrep pattern>  (pass = NOT found)
   if [ -f "$2" ] && grep -Eq -- "$3" "$2" 2>/dev/null; then bad "$1"; else ok "$1"; fi
+}
+is_absent() { # is_absent <path>  (a dangling symlink counts as present: a broken
+              # unit or .network link is exactly the thing being checked for)
+  [ ! -e "$1" ] && [ ! -L "$1" ]
+}
+is_masked() { # is_masked <path>  - systemd's mask is a symlink to /dev/null
+  [ "$(readlink "$1" 2>/dev/null)" = /dev/null ]
+}
+is_wanted() { # is_wanted <root> <target> <unit>  - enabled = a .wants symlink.
+              # A symlink test, never an existence test: the entry's target is an
+              # absolute in-root path (/usr/lib/systemd/system/X), so -e follows it
+              # out of the root and answers about the host doing the inspecting.
+  [ -L "$1/etc/systemd/system/$2.target.wants/$3" ]
+}
+
+# The network stack the openmux-network layer builds, asserted on the finished
+# image. File state is the only thing observable without booting, and the two
+# halves have to be checked together: a unit that is masked but still wanted by a
+# target is a failed dependency job on every boot, and a unit that is neither
+# enabled nor masked is a daemon nobody started.
+network_stack() { # network_stack <root> <label>
+  local r=$1 t=$2 u p left netplan_files
+  echo "  -- network stack: NetworkManager, networkd retired ($t)"
+  [ -x "$r/usr/sbin/NetworkManager" ] && ok "$t: NetworkManager installed" \
+    || bad "$t: /usr/sbin/NetworkManager missing"
+  is_wanted "$r" multi-user NetworkManager.service \
+    && ok "$t: NetworkManager enabled" || bad "$t: NetworkManager not enabled"
+  # The two decisions the layer owns, and the backend it depends on.
+  chk "$t: NM settings store is keyfile" "$r/etc/NetworkManager/conf.d/10-openmux.conf" '^plugins=keyfile$'
+  chk "$t: NM delegates DNS to resolved" "$r/etc/NetworkManager/conf.d/10-openmux.conf" '^dns=systemd-resolved$'
+  chk "$t: NM Wi-Fi backend is iwd" "$r/etc/NetworkManager/conf.d/iwd.conf" '^wifi\.backend=iwd$'
+  [ -f "$r/var/lib/dpkg/info/iwd.list" ] && ok "$t: iwd installed" \
+    || bad "$t: iwd missing, so Wi-Fi has no supplicant (wpa_supplicant is not installed either)"
+  for u in systemd-networkd.service systemd-networkd.socket \
+           systemd-networkd-wait-online.service systemd-network-generator.service \
+           dbus-org.freedesktop.network1.service; do
+    if is_masked "$r/etc/systemd/system/$u"; then ok "$t: $u masked"
+    else bad "$t: $u not masked (is: $(readlink "$r/etc/systemd/system/$u" 2>/dev/null || echo 'not a symlink'))"; fi
+  done
+  left=$(ls "$r"/etc/systemd/system/*.wants/systemd-networkd* 2>/dev/null)
+  [ -z "$left" ] && ok "$t: nothing wants systemd-networkd" \
+    || bad "$t: still wanted by: $(echo "$left" | tr '\n' ' ')"
+  # NetworkManager's [Install] has Also=NetworkManager-wait-online.service, so
+  # enabling NM links a 60 s boot-stall unit into network-online.target; the layer
+  # drops that link (it is not masked: a masked unit someone still wants fails the
+  # job). rescue-ssh.target in /usr/lib does Require network-online.target, which
+  # is why reaching that target must not wait for a cable.
+  is_absent "$r/etc/systemd/system/network-online.target.wants/NetworkManager-wait-online.service" \
+    && ok "$t: NetworkManager-wait-online is not wanted (no 60 s boot ceiling)" \
+    || bad "$t: NetworkManager-wait-online.service is wanted by network-online.target"
+  # networkd's generated interface config must be gone with it: left behind, the
+  # first unit unmasked re-runs a second DHCP client on the same link.
+  for u in 01-eth0.network 02-wlan0.network; do
+    is_absent "$r/etc/systemd/network/$u" && ok "$t: /etc/systemd/network/$u removed" \
+      || bad "$t: /etc/systemd/network/$u still present"
+  done
+  # udev applies these, not networkd: without them the interfaces stop being
+  # eth0/wlan0 and every ifname= match and operator habit moves with them.
+  for u in 99-default.link 73-usb-net-by-mac.link; do
+    is_masked "$r/etc/systemd/network/$u" && ok "$t: $u still disabled (names stay kernel's)" \
+      || bad "$t: /etc/systemd/network/$u is not a null link - interface names will change"
+  done
+  # DNS: NM's conf names resolved, so resolved has to be there and own the file.
+  is_wanted "$r" sysinit systemd-resolved.service \
+    && ok "$t: systemd-resolved enabled" || bad "$t: systemd-resolved not enabled but NM is told to use it"
+  [ "$(readlink "$r/etc/resolv.conf" 2>/dev/null)" = "../run/systemd/resolve/stub-resolv.conf" ] \
+    && ok "$t: /etc/resolv.conf is the resolved stub" \
+    || bad "$t: /etc/resolv.conf is not the resolved stub ($(readlink "$r/etc/resolv.conf" 2>/dev/null || echo 'not a symlink'))"
+  # netplan.io is installed because the Raspberry Pi build of network-manager
+  # Depends on it (Debian's does not). It stays an inert observer only while
+  # /etc/netplan holds no file: netplan_generate() reads *.yaml AND *.yml, feeds
+  # them to whichever `renderer:` names, and a file naming Networkd is a route back
+  # to the masked daemon; one naming NetworkManager moves connection storage away
+  # from the keyfile store. Both extensions therefore have to stay absent.
+  netplan_files=$(ls "$r"/etc/netplan/*.yaml "$r"/etc/netplan/*.yml 2>/dev/null | tr '\n' ' ')
+  [ -z "$netplan_files" ] \
+    && ok "$t: /etc/netplan holds no file (keyfile stays the only connection source)" \
+    || bad "$t: /etc/netplan would be rendered: $netplan_files"
+  # Recommends are off build-wide (APT::Install-Recommends=false), which is what
+  # keeps a second supplicant, a second DHCP client and the captive-portal helper
+  # out of the image. Pinned because they are Recommends of network-manager: one
+  # changed apt mode and two programs would answer for one interface.
+  for p in wpasupplicant isc-dhcp-client dhcpcd-base dnsmasq-base; do
+    is_absent "$r/var/lib/dpkg/info/$p.list" && ok "$t: $p absent" \
+      || bad "$t: $p is installed (only Recommends-off keeps the stack single)"
+  done
 }
 
 # --- loop devices (privileged container) ------------------------------------
@@ -142,7 +233,7 @@ chk   "admin password set (shadow hash)" "$R/etc/shadow" "^${admin}:[^:*!]"
 chk   "root locked (no password)"        "$R/etc/shadow" '^root:\*'
 chk   "admin sudo (passwd mode)"         "$R/etc/sudoers.d/010_rpi-passwd" "$admin .*ALL"
 # additional-account checks (fixture: qa1; EXPECT_QA1=0 to skip)
-if [ "${EXPECT_QA1:-1}" = "1" ]; then
+if [ "${EXPECT_QA1-1}" = "1" ]; then
 chk   "qa1 account present"              "$R/etc/passwd" '^qa1:'
 chk   "qa1 password set"                 "$R/etc/shadow" '^qa1:[^:*!]'
 chk   "qa1 NOPASSWD sudoers"             "$R/etc/sudoers.d/openmux-qa1" 'qa1 .*NOPASSWD'
@@ -152,8 +243,14 @@ chk   "qa1 member of sudo group" "$R/etc/group" '^sudo:.*qa1'
 fi
 chk   "admin member of adm group" "$R/etc/group" '^adm:.*'"$admin"
 
-# SSH keys
+# SSH keys. A spec hands the admin key over as key_file (cross-checked against
+# $SPEC/keys/admin.pub) or as ssh_key (only its arrival in the image is checkable),
+# or not at all - password-only then, and there is no authorized_keys to inspect, so
+# EXPECT_SSH_KEY=0 skips the group instead of failing it.
 [ -n "$admin" ] && {
+ if [ ! -f "$SPEC/keys/admin.pub" ] && [ "${EXPECT_SSH_KEY-1}" != 1 ]; then
+  echo "  SKIP  admin SSH key group (spec sets neither key_file nor ssh_key)"
+ else
   if [ -f "$SPEC/keys/admin.pub" ]; then
     k=$(head -n1 "$SPEC/keys/admin.pub")
     chk "admin authorized_keys matches key_file" \
@@ -169,9 +266,10 @@ chk   "admin member of adm group" "$R/etc/group" '^adm:.*'"$admin"
     && ok "admin .ssh owned by admin (uid 1000)" || bad "admin .ssh ownership wrong (want uid 1000)"
   [ "$(stat -c '%a' "$R/home/$admin/.ssh/authorized_keys")" = 600 ] \
     && ok "admin authorized_keys mode 600" || bad "admin authorized_keys mode"
+ fi
 }
 # additional-account qa1 .ssh checks (fixture-specific; EXPECT_QA1=0 to skip)
-if [ "${EXPECT_QA1:-1}" = "1" ]; then
+if [ "${EXPECT_QA1-1}" = "1" ]; then
 [ -s "$R/home/qa1/.ssh/authorized_keys" ] \
   && ok "qa1 authorized_keys non-empty" || bad "qa1 authorized_keys missing/empty"
 # qa1's uid/gid come from the image (useradd assigned 1001/1001 here)
@@ -179,7 +277,18 @@ qa1_owner=$(awk -F: '$1=="qa1" {print $3":"$4; exit}' "$R/etc/passwd")
 [ "$(stat -c '%u:%g' "$R/home/qa1/.ssh/authorized_keys" 2>/dev/null)" = "$qa1_owner" ] \
   && ok "qa1 .ssh owned by qa1 ($qa1_owner)" || bad "qa1 .ssh ownership wrong (want $qa1_owner)"
 fi
-chk   "post_install marker /usr/local/openmux/marker.txt" "$R/usr/local/openmux/marker.txt" 'extra'
+# `${VAR-1}` and not `${VAR:-1}`: an EMPTY value must mean "this spec does not ask
+# for it", and the `:-` form substitutes the default for empty as well as for unset,
+# which would make EXPECT_ADD_PKGS= run the default list anyway.
+if [ "${EXPECT_POST_INSTALL-1}" = 1 ]; then
+  chk "post_install marker /usr/local/openmux/marker.txt" "$R/usr/local/openmux/marker.txt" 'extra'
+fi
+# `additional_packages` installs distro packages by name; the fixture asked for
+# curl and git, so those two are the default list to look for in /usr/bin.
+for p in ${EXPECT_ADD_PKGS-curl git}; do
+  [ -x "$R/usr/bin/$p" ] && ok "additional_packages: $p installed" \
+    || bad "additional_packages: /usr/bin/$p missing"
+done
 
 # first-boot filesystem extension (openmux-extend-filesystem layer, target only)
 chk   "extend-filesystem script installed" "$R/usr/local/sbin/openmux-extend-filesystem.sh" 'growpart'
@@ -270,11 +379,12 @@ else
   printf '        scan_ftdi internal : [%s]\n' "${p_int:-unreadable}" >&2
   printf '        scan_ftdi external : [%s]\n' "${p_ext:-unreadable}" >&2
 fi
-[ -x "$R/usr/bin/curl" ] && ok "distro package curl" || bad "curl missing"
-[ -x "$R/usr/bin/git" ] && ok "distro package git" || bad "git missing"
+
 [ -L "$R/etc/systemd/system/sysinit.target.wants/openmux-detect-hardware.service" ] \
   && ok "openmux-detect-hardware.service enabled" || bad "hw-detect service not enabled"
 chk   "hostname" "$R/etc/hostname" '^openmux$'
+
+network_stack "$R" target
 
 umount "$V/root" "$V/boot" 2>/dev/null
 for d in "${LOOPS[@]:-}"; do [ -n "$d" ] && losetup -d "$d" 2>/dev/null; done; LOOPS=()
@@ -403,6 +513,8 @@ chk_not   "medium cmdline has no by-slot ref" "$V/mboot/cmdline.txt" 'by-slot'
 chk       "medium fstab root is PARTUUID"    "$M/etc/fstab" '^PARTUUID=[0-9a-f]{8}-02[ ]+/'
 chk_not   "medium fstab has no by-slot ref"  "$M/etc/fstab" 'by-slot'
 chk   "medium config.txt: dtparam=uart0 lines"  "$V/mboot/config.txt"  'dtparam=uart0_console=on'
+
+network_stack "$M" medium
 
 # embedded target image must be the exact target artefact from dist/
 EMB=$(ls "$M/opt/openmux-installer/images/" 2>/dev/null | head -n1)

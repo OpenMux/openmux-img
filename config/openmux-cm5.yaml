@@ -39,8 +39,9 @@ image:
   layer: image-rpios
   # 200% lets genimage size the boot (FAT) partition up (firmware is ~90 MiB).
   boot_part_size: 200%
-  # 300% caps the root partition at 3 GiB - plenty for minbase + openmux
-  # packages. Raise this if the image set grows.
+  # 300% caps the root partition at 3 GiB. The filesystem inside holds ~0.75 GiB
+  # (openmux-base-system + the openmux packages), so apt growth over an update
+  # cycle has room. Raise this if the image set grows.
   root_part_size: 300%
   name: openmux-cm5
   # Stated explicitly (not left to the layer default) because it is

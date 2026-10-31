@@ -74,7 +74,8 @@ build/
   parse-buildspec.py        build spec → IGconf_* overrides + generated hooks
   make-deb.sh               package/*/ -> dist/pkgs/*.deb (dpkg-deb --root-owner-group)
 config/
-  openmux-base.yaml         shared: trixie-minbase base suite + image-rpios layout;
+  openmux-base.yaml         shared: openmux-base-system (the base system, listed
+                            out in layer/) + image-rpios layout;
                             layer map: base + serial (one layer PER KEY - the
                             engine's layer: map has no list support)
   openmux-cm5.yaml          TARGET  (device rpi-cm5, no hardcoded accounts);
@@ -83,6 +84,18 @@ config/
   openmux-install-medium.yaml  MEDIUM (root/blank factory appliance); layer map:
                             medium
 layer/
+  openmux-base-system/      the base system as an explicit Requires list (the
+                            engine's trixie-minbase suite minus systemd-net-min);
+                            no packages of its own - a suite layer names its
+                            providers and RequiresProvider never picks one, so
+                            naming them is the only way to choose
+  openmux-network/          NetworkManager + iwd as the only network manager:
+                            conf.d (keyfile store, DNS left with resolved),
+                            systemd-networkd masked, its generated .network files
+                            removed, the udev null-.link pair re-owned (that is
+                            what keeps eth0/wlan0); one cleanup hook, which runs
+                            after EVERY layer's customize hooks, so nothing here
+                            depends on plan order
   openmux-serial-console/   CM5 serial console: cmdline.d fragment (serial
                             console FIRST, tty1 kept) + config.txt append
                             (uart0/dtparam routing for the 40-pin PL011); login
@@ -112,9 +125,10 @@ package/
   openmux-factory-tools/    eeprom/serial factory utilities
   openmux-install-menu/     the factory boot menu (option 8 toggles the stick's
                             read-only root by rewriting the ONE line of
-                            cmdline.txt - minbase has no raspi-config, and the
-                            parameter itself is an image default from the layer
-                            fragment above; option 3 is a boot-order/bootloader
+                            cmdline.txt - the overlayroot parameter is an image
+                            default from the layer fragment above, and the menu
+                            edits the token in place, see set_overlayroot_token;
+                            option 3 is a boot-order/bootloader
                             sub-menu that shows the current BOOT_ORDER and the
                             running vs. on-stick bootloader version before any
                             SPI write, and refuses downgrades, frozen modules
@@ -125,10 +139,18 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 
 ## How it maps onto rpi-image-gen
 
-- Configs select `layer.base: trixie-minbase` (the engine's Debian trixie
-  multiarch-minimum suite: systemd, openssh-server, timesyncd, rpi
-  firmware/skel layers) plus `image.layer: image-rpios` (VFAT boot + ext4
-  root, genimage).
+- Configs select `layer.base: openmux-base-system` (this repo: Debian trixie
+  rootfs + apt suite + rpi utility layers, systemd, openssh-server, timesyncd,
+  resolved) plus `image.layer: image-rpios` (VFAT boot + ext4
+  root, genimage). It replaces the engine's `trixie-minbase` suite layer, which
+  hard-requires `systemd-net-min` by name and therefore could not be given a
+  different network manager.
+- Networking is NetworkManager with iwd as its Wi-Fi backend
+  (`layer/openmux-network`), and nothing else: systemd-networkd is masked, the
+  `.network` files generated for it are removed, and its `wait-online` unit -
+  plus NetworkManager's own, which `enable` pulls in through `Also=` - has no
+  route into the boot. `wpa_supplicant` and every DHCP-client package stay
+  absent because Recommends are off build-wide.
 - The device layer is the engine's built-in `rpi-cm5` (`device.layer:
   rpi-cm5`; `class: cm5`).
 - The target's primary account uses the engine's native `user1` variables
@@ -326,7 +348,7 @@ is how the offline tests drive them against a fake sysfs tree with no hardware.
   Its initramfs script *is* in the initrd, and first in `init-bottom/ORDER`,
   but it picks the overlay driver by grepping `/proc/filesystems` twice
   (`grep -q "\t$module$"` before and after `modprobe -qb`), and **this initrd
-  has no `grep`**: the image is minbase with `--no-install-recommends`,
+  has no `grep`**: the image is a minimal base with `--no-install-recommends`,
   and `BUSYBOX=auto` only pays off through a busybox-initramfs hook,
   which is not among this image's hooks (`dmsetup fsck keymap klibc-utils
   kmod overlayroot raspi-firmware-fsck resume thermal udev`). Clearing
@@ -371,7 +393,7 @@ is how the offline tests drive them against a fake sysfs tree with no hardware.
   booted stick really is overlaid can only be seen on the stick itself -
   `findmnt /` must report `overlay` and `findmnt -o OPTIONS /media/root-ro` must
   contain `ro`.
-- **`/dev/serial0`.** Stock minbase has no udev rule for it;
+- **`/dev/serial0`.** The base image has no udev rule for it;
   `openmux-hardware` ships `99-openmux-serial0.rules`
   (SYMLINK for `ttyAMA0`) because the factory menu references `/dev/serial0`.
 - **A loopback test cannot prove port numbering.** Pairwise loopback proves that

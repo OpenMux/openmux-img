@@ -1,0 +1,92 @@
+# METABEGIN
+# X-Env-Layer-Name: openmux-network
+# X-Env-Layer-Category: openmux
+# X-Env-Layer-Desc: NetworkManager (keyfile store) with iwd as its Wi-Fi
+# X-Env-Layer-Desc: backend, as the image's single network manager. The
+# X-Env-Layer-Desc: upstream layers do the installing: network-manager adds
+# X-Env-Layer-Desc: the package and enables NetworkManager, network-manager-iwd
+# X-Env-Layer-Desc: pulls iwd and writes conf.d/iwd.conf. This layer owns what
+# X-Env-Layer-Desc: they cannot - making the choice exclusive, so that no other
+# X-Env-Layer-Desc: daemon can answer for an interface:
+# X-Env-Layer-Desc: (1) systemd-networkd is masked (service, socket,
+# X-Env-Layer-Desc: -wait-online, -generator and its D-Bus alias), not simply
+# X-Env-Layer-Desc: left unenabled: the systemd package ships
+# X-Env-Layer-Desc: /usr/lib/systemd/system-preset/90-systemd.preset containing
+# X-Env-Layer-Desc: `enable systemd-networkd.service`, so a preset on its own
+# X-Env-Layer-Desc: puts it on boot; mask additionally survives networkd's own
+# X-Env-Layer-Desc: Also= chain and D-Bus activation through
+# X-Env-Layer-Desc: dbus-org.freedesktop.network1.service.
+# X-Env-Layer-Desc: (2) the .network files rpi-device-base generates for
+# X-Env-Layer-Desc: networkd are removed - left in place they describe an
+# X-Env-Layer-Desc: interface networkd would claim (with its own DHCP client)
+# X-Env-Layer-Desc: the moment anything unmasks it;
+# X-Env-Layer-Desc: (3) the null 99-default.link / 73-usb-net-by-mac.link are
+# X-Env-Layer-Desc: re-owned here. They are applied by systemd-udevd
+# X-Env-Layer-Desc: (systemd.link(5)), not by networkd, so they keep working
+# X-Env-Layer-Desc: under NetworkManager, and without them udev falls back to
+# X-Env-Layer-Desc: its NamePolicy and every interface name changes;
+# X-Env-Layer-Desc: (4) conf.d/10-openmux.conf pins the settings store to
+# X-Env-Layer-Desc: keyfile and leaves DNS with systemd-resolved, which this
+# X-Env-Layer-Desc: layer therefore requires: /etc/resolv.conf is resolved's
+# X-Env-Layer-Desc: stub symlink and NetworkManager must not take it over.
+# X-Env-Layer-Desc: wpa_supplicant is not installed and must stay out: it is a
+# X-Env-Layer-Desc: Recommends of network-manager, and Recommends are off
+# X-Env-Layer-Desc: build-wide (APT::Install-Recommends=false); iwd is the
+# X-Env-Layer-Desc: Wi-Fi Supplicant role and a second one on nl80211 would
+# X-Env-Layer-Desc: conflict with it. No DHCP client package is needed either -
+# X-Env-Layer-Desc: NetworkManager's internal client is the default.
+# X-Env-Layer-Desc: Connections are not baked: /var/lib/... is empty and
+# X-Env-Layer-Desc: /etc/NetworkManager/system-connections holds nothing until
+# X-Env-Layer-Desc: a connection is created at runtime (nmcli), as before.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: network-manager-iwd,systemd-resolved
+# X-Env-Layer-Provides: openmux-network
+#
+# METAEND
+---
+# Everything happens in ONE cleanup hook
+# (openmux-network.d/hooks/cleanup10-network-stack).
+#
+# Phase, not Requires, is what makes this layer's edits final. runner feeds
+# every plan layer into a single bdebstrap run, whose phases are strictly
+# setup -> packages -> customize -> cleanup, each phase visiting plan layers in
+# plan order. So a cleanup hook runs after every layer's customize hook no
+# matter where this layer lands in the plan: the deletion of rpi-device-base's
+# generated .network files cannot be undone by that layer being planned later
+# (a customize hook would need a Requires: rpi-device-base edge for that, and
+# even then a later layer could re-create them), and `systemctl mask` here is
+# the last write to unit state before the filesystem is captured.
+#
+# Two of the steps are guarded, because an unguarded failure here removes the
+# image's networking without saying so:
+#   * the network-manager layer enables the unit through $BDEBSTRAP_HOOKS/
+#     enable-units, which prints "Unit ... not found. Skipping" and exits 0
+#     when the unit is absent - so the hook checks the wants entry exists
+#     before tearing networkd down, and fails the build instead of shipping an
+#     image where no daemon manages a link;
+#   * wifi.backend=iwd is checked for the same reason: with neither iwd nor
+#     wpa_supplicant in the image, WPA has no backend at all, and an image that
+#     cannot associate a WPA network is only detectable by booting it.
+#
+# Which NetworkManager this is: rpi-debian-trixie is in the base, and the
+# Raspberry Pi suite's network-manager has the higher version, so the image gets
+# 1.52.1-1+rpt4 rather than Debian's 1.52.1-1. That build adds a hard
+# `Depends: netplan.io`, which is where netplan.io, libnetplan1,
+# python3-netplan/-yaml, iproute2 and ethtool come from (32 packages over the
+# systemd-networkd stack, none of them removed from it). netplan is an inert
+# observer here: /etc/netplan ships empty, so netplan-generator generates nothing
+# and the keyfile store remains the only source of connections. A .yaml naming
+# `renderer: networkd` would be a route back to the masked daemon, which is why
+# om-verify.sh asserts the directory stays empty rather than assuming it.
+#
+# Deliberately NOT done here:
+#   * masking NetworkManager-wait-online.service. `systemctl enable NetworkManager`
+#     links it into network-online.target.wants through its [Install] Also=, and
+#     the hook drops that link instead: a masked unit that something still wants
+#     is a failed dependency job at boot, and an upgrade that re-runs enable would
+#     restore the entry. The unit to mask is the one whose own unit file is
+#     irrelevant here (systemd-networkd-wait-online), not this one.
+#   * masking iwd.service: iwd is the Wi-Fi backend, it has to run.
+#   * touching /etc/iwd/main.conf. EnableNetworkConfiguration=false is a conffile
+#     of the Debian iwd package and is what NetworkManager wants: iwd answers
+#     802.11, the manager owns addressing.
