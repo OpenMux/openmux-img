@@ -22,3 +22,6 @@ layer/openmux-repo/sources/openmux.gpg
 # directory; any other committed <phase>* file in it would be intentional)
 hooks/customize94-openmux-users
 hooks/customize95-openmux-postinstall
+
+# Environment files
+*.env
