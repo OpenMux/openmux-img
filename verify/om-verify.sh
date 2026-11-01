@@ -366,6 +366,76 @@ if python3 "$FT/scan-ftdi-adapters.py" --devices-dir /nonexistent \
 else
   ok "scanner refuses a dash in a serial base"
 fi
+# The serial sub-menu's header IS `scan-ftdi-adapters.py --summary`, and it is read
+# over a serial line, so a row that wraps is a table an operator cannot use while
+# deciding what to flash. Width is a property of the strings production firmware
+# writes, not of the code, so this runs the shipped scanner against a bus carrying
+# them: two console chips on the internal paths, and one card - three chips under its
+# own hub, one base.
+# The fixture is nested real directories with top-level symlinks, because a device's
+# parent is resolved through realpath(): a flat tree would report every chip as an
+# adapter hanging off a hub that is not there.
+FTF="$V/ftdi"; rm -rf "$FTF"
+ftf() { # ftf <bus-port> <vid> <pid> <manufacturer> <product> <serial> <busnum> <devnum>
+  local d
+  case $1 in
+    *.*) d="$FTF/_real/${1%.*}/$1" ;;   # inside the parent port's own directory
+    *)   d="$FTF/_real/$1" ;;
+  esac
+  mkdir -p "$d"
+  printf '%s\n' "$2"          > "$d/idVendor"
+  printf '%s\n' "$3"          > "$d/idProduct"
+  printf '%s\n' "$4"          > "$d/manufacturer"
+  printf '%s\n' "$5"          > "$d/product"
+  printf '%s\n' "$7"          > "$d/busnum"
+  printf '%s\n' "$8"          > "$d/devnum"
+  [ -z "$6" ] || printf '%s\n' "$6" > "$d/serial"
+  ln -s "$d" "$FTF/$1"
+}
+ftf 2-1   1d6b 0002 'Linux 6.6.87 xhci-hcd' 'xHCI Host Controller' '' 2 1
+ftf 2-1.1 0403 6011 'OpenMux' 'OpenMux Console HW8, Internal FTDI' OMC0003-A 1 2
+ftf 2-1.2 0403 6011 'OpenMux' 'OpenMux Console HW8, Internal FTDI' OMC0003-B 1 3
+ftf 1-1   1d6b 0002 'Linux 6.6.87 xhci-hcd' 'xHCI Hub' '' 1 4
+ftf 1-1.2 0403 6011 'OpenMux' 'OpenMux eXtention EX-12' OMX9999-A 1 6
+ftf 1-1.3 0403 6011 'OpenMux' 'OpenMux eXtention EX-12' OMX9999-B 1 7
+ftf 1-1.4 0403 6011 'OpenMux' 'OpenMux eXtention EX-12' OMX9999-C 1 8
+# The three environment variables the tool reads are pinned here rather than
+# inherited: whichever console paths, maker or product the machine running this
+# happens to export would move the fixture chips into another role, and the report
+# below asserts one specific shape. An empty value counts as unset.
+if SUM=$(OPENMUX_FTDI_INTERNAL_PATHS=2-1.1,2-1.2 OPENMUX_MANUFACTURER= \
+         OPENMUX_PRODUCT_INTERNAL= OPENMUX_PRODUCT_EXTERNAL= \
+         python3 "$FT/scan-ftdi-adapters.py" --devices-dir "$FTF" --env-file /dev/null \
+           --summary 2>&1) && [ -n "$SUM" ]; then
+  ok "shipped scanner renders --summary for that bus"
+else
+  bad "shipped scanner --summary failed:"; printf '%s\n' "$SUM" | sed 's/^/        /'
+fi
+# The console chips have to be ROWS of the same table (that is what the header was
+# changed to show), with the manufacturer beside the product - a card reflashed by a
+# site carries both, and it is the only way to see it without a cable.
+chk_summary() { # chk_summary <desc> <egrep>
+  if printf '%s\n' "$SUM" | grep -Eq -- "$2"; then ok "$1"
+  else bad "$1"; printf '%s\n' "$SUM" | sed 's/^/        | /'; fi
+}
+chk_summary "--summary lists the console chip, with its maker" \
+            'OMC0003-A[ ]+console[ ]+OpenMux[ ]+OpenMux Console HW8, Internal FTDI'
+chk_summary "--summary rolls a card up to one line" \
+            '^  1-1[ ]+OMX9999[ ]+3 ABC[ ]+/dev/openmux/OMX9999/port1-12$'
+# The two hubs in the fixture are USB devices too, and are filtered out by id. When
+# a row appears for something that is not an FTDI, the summary is no longer a list of
+# the chips the options can program, and the operator reads a hub as a card.
+if printf '%s\n' "$SUM" | grep -qi 'xhci'; then
+  bad "--summary lists a non-FTDI device"; printf '%s\n' "$SUM" | sed 's/^/        | /'
+else
+  ok "--summary lists only the 0403:6011 chips"
+fi
+n_card=$(printf '%s\n' "$SUM" | sed -n '/EX-12 CARDS/,/^$/p' | grep -cE '^  [0-9]')
+[ "$n_card" = "1" ] && ok "--summary prints one card row for three chips" \
+  || bad "--summary printed $n_card card rows for one card"
+too_wide=$(printf '%s\n' "$SUM" | awk 'length($0)>80 {print length($0)": "$0}' | head -3)
+[ -z "$too_wide" ] && ok "--summary fits an 80-column console" \
+  || { bad "--summary exceeds 80 columns:"; printf '        %s\n' "$too_wide"; }
 # The serial prefix is MATCHED, not displayed, in three files that ship from two
 # packages: the udev rules and the boot-time identity script (openmux-hardware),
 # and the factory tools' default (openmux-factory-tools). They have to move in
@@ -476,6 +546,12 @@ chk_not "menu has no blind BOOT_ORDER rewrite"    "$M/usr/local/sbin/openmux-men
 chk     "menu 2 is the serial sub-menu"        "$M/usr/local/sbin/openmux-menu.sh" 'serial_menu\(\)'
 chk     "sub-menu can program a card"          "$M/usr/local/sbin/openmux-menu.sh" "Program an EX-12 adapter's serial number"
 chk     "sub-menu tests console and card apart" "$M/usr/local/sbin/openmux-menu.sh" "--pairs card"
+# The sub-menu's header is the scanner's report (--summary, checked against a fake
+# bus in the target section above), not a summary the menu builds out of the tsv. Two
+# answers to "which of these chips is the console" is precisely how a chip gets
+# flashed by the wrong option, so a menu that starts deciding for itself fails here.
+chk     "sub-menu header comes from the scanner" "$M/usr/local/sbin/openmux-menu.sh" '--summary'
+chk_not "sub-menu builds no device summary itself" "$M/usr/local/sbin/openmux-menu.sh" 'Console chips :'
 chk_not "menu never confirms a flash itself"   "$M/usr/local/sbin/openmux-menu.sh" 'program-ftdi[a-z-]*\.py.*--yes'
 n_opts=$(sed -n '/^main_menu()/,/^  done/p' "$M/usr/local/sbin/openmux-menu.sh" |
          grep -cE '^  [0-9]\) ')

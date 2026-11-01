@@ -319,15 +319,6 @@ ftdi_adapter_summary() {
     END { for (i = 1; i <= n; i++) printf "%s\t%s\n", order[i], list[order[i]] }'
 }
 
-# The console's own chips, which the header shows so the operator can see the
-# tool is talking about the hardware they are looking at. Flat /dev/openmux, and
-# never offered as a card.
-ftdi_console_summary() {
-  ftdi_tools_present || return 1
-  python3 "$FTDI_SCAN" --format tsv --include-internal 2>/dev/null |
-    awk -F'\t' '$1 == "console" && $6 != "" { printf "%s ", $6 }' | sed 's/ *$//'
-}
-
 # Ask for a serial base, and refuse it here if the udev rules would not match it:
 # a base that is written but never matched leaves a programmed chip with no
 # /dev/openmux ports, which reads to the next person as a broken card. The rules
@@ -481,47 +472,24 @@ test_adapter_ports() {
 }
 
 serial_menu() {
-  local choice console adapters n
+  local choice
   while true; do
     clear
     msg "========================================"
     msg "   Serial numbers and serial ports"
     msg "========================================"
     ftdi_tools_present || { pause; return 0; }
-    console=$(ftdi_console_summary)
-    adapters=$(ftdi_adapter_summary)
-    n=$(grep -c . <<<"$adapters")
-    # Each group names the options that act on it, which is the unambiguous way to
-    # say what the old parenthetical tried to: the console's built-in chips are
-    # handled by options 1 and 4 and never by the EX-12 ones. "not offered as a
-    # card" read to an operator with eight live ports like word for word the
-    # description of a fault, so it is gone rather than rephrased.
-    if [[ -n $console ]]; then
-      msg "  Console chips : $console"
-      msg "                  ports 1-8 in /dev/openmux  (program with 1, test with 4)"
-    else
-      msg "  Console chips : none seen on the internal paths. Either nothing is"
-      msg "                  programmed yet, or this board enumerates somewhere"
-      msg "                  other than 2-1.1/2-1.2 - list them and check before"
-      msg "                  programming anything."
-    fi
-    if (( n == 0 )); then
-      msg "  EX-12 cards   : none on the bus  (program with 2, test with 5)"
-    else
-      msg "  EX-12 cards   : $n  (program with 2, test with 5)"
-      while IFS=$'\t' read -r hub bases; do
-        if [[ -z $bases ]]; then
-          msg "                  hub $hub: present, not programmed"
-        else
-          msg "                  hub $hub: programmed as $bases"
-          # Only when there is exactly one base: two on one hub would mean the
-          # card's own chips disagree, and /dev/openmux/A,B names no folder.
-          if [[ -n $bases && $bases != *,* ]]; then
-            msg "                            /dev/openmux/$bases/port1-12"
-          fi
-        fi
-      done <<<"$adapters"
-    fi
+    # The table is the scanner's, not the menu's (--summary). Two reasons, and the
+    # second is the one that matters: which chip is a console chip and which is a
+    # card is a topology question that the flashers answer from scan_ftdi.py, so a
+    # hand-built summary here would be a second answer, free to disagree, shown at
+    # the exact moment the operator decides what to program. The first reason is
+    # simply that two lines cannot show what is on the bus: the console's chips as
+    # rows, a card's three chips, or who made them.
+    python3 "$FTDI_SCAN" --summary
+    msg ""
+    msg "  Console chips are programmed with 1 and tested with 4, an EX-12 card with"
+    msg "  2 and 5. A flasher always shows its chips and asks before writing."
     msg ""
     msg "  1) Program the console's internal serial number"
     msg "  2) Program an EX-12 adapter's serial number"

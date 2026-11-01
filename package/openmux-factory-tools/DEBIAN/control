@@ -1,5 +1,5 @@
 Package: openmux-factory-tools
-Version: 1.2.0
+Version: 1.3.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
 Homepage: https://github.com/OpenMux
@@ -12,7 +12,10 @@ Description: OpenMux factory provisioning and test tools
  a topology scan that tells the console's own FTDI chips apart from a
  plug-in EX-12 adapter by where each chip hangs on USB (they share one
  VID:PID, and an unprogrammed chip has no serial to tell them apart
- by), an audit that checks every /dev/openmux/portN against the
+ by), in a full report and a compact --summary report (every chip in
+ one table, the console's own included, plus one line per card) which
+ is what the install medium's menu prints as its header, an audit that
+ checks every /dev/openmux/portN against the
  USB interface the udev rules promise it, a serial loopback test and
  the board test runner. The flashers refuse the console's chips when
  handed a card and refuse a card when handed the console, and re-read

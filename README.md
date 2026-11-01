@@ -206,8 +206,11 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 `openmux-factory-tools` installs to `/opt/openmux-factory-tools` on **both**
 images: the install medium's menu drives the same files a technician uses by
 hand, so there is one behaviour to learn. Menu option 2 is a sub-menu
-(console serial, adapter serial, identify, test console, test adapter); the
-same steps exist as commands:
+(console serial, adapter serial, identify, test console, test adapter); its
+header is `scan-ftdi-adapters.py --summary` - one table of every FTDI on the bus,
+the console's own chips included, and one line per card - because the menu must
+print the same answer the flashers act on, not a summary of its own. The same
+steps exist as commands:
 
 Every FTDI part on this hardware is an FT4232H with the same `0403:6011`, and an
 unprogrammed chip reports **no serial at all**, so nothing here decides what a
@@ -242,6 +245,8 @@ re-enumerates with a serial no rule claims, and the board simply has no
 ```
 scan-ftdi-adapters.py              # what is on the bus, which is console vs card, what is programmed
   --serials                        # one programmed base per line + the ports it covers
+  --summary                        # the compact form: every chip in one table (console
+                                   # included) + one line per card - the menu's header
   --format tsv                     # machine-readable, what the menu parses
   --snapshot f --diff-with f       # unplug/replug and it names the hub that changed
   --check-base OMX000042           # would the rules match this? no hardware needed

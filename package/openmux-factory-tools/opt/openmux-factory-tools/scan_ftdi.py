@@ -533,7 +533,11 @@ def resolve_identity(env_values, key, cli_value=None, default=""):
 
 
 def format_rows(rows, headers):
-    """Small fixed-width table so text output lines up without a dependency."""
+    """Small fixed-width table so text output lines up without a dependency.
+
+    Each line is right-stripped: the last column is padded like every other one,
+    and trailing blanks are what tip a line past 80 columns and make a serial
+    console wrap it onto a second line for nothing."""
     cells = [["" if cell is None else str(cell) for cell in row] for row in rows]
     widths = [len(header) for header in headers]
     for row in cells:
@@ -542,4 +546,4 @@ def format_rows(rows, headers):
     spec = "  ".join(f"{{:<{width}}}" for width in widths)
     out = [spec.format(*headers), spec.format(*("-" * width for width in widths))]
     out += [spec.format(*row) for row in cells]
-    return "\n".join(out)
+    return "\n".join(line.rstrip() for line in out)
