@@ -8,9 +8,13 @@
 # This layer installs the packages the TARGET image needs:
 #   - openmux-hardware      (udev rules, /dev/serial0 bridge, hw-detect service)
 #   - openmux-factory-tools (eeprom/serial factory utilities)
+#   - openmux-net-tools     (set-ip: the wired address on end0)
 # The install medium installs the same debs PLUS openmux-install-menu and
 # overlayroot in its own layer (openmux-install-medium), where all of them
-# can be installed in one apt call.
+# can be installed in one apt call. openmux-net-tools is deliberately not one of
+# them: on the medium the root is an overlay over a read-only stick, so a file
+# written there disappears on reboot, and "configure this box's address" read from
+# the stick would be a lie about the device in front of the operator.
 #
 # No `Requires: openmux-repo` deliberately: the install medium does not use
 # the custom repo at all, and pulling openmux-repo in by dependency would
@@ -22,9 +26,9 @@
 # X-Env-Layer-Name: openmux-packages
 # X-Env-Layer-Category: openmux
 # X-Env-Layer-Desc: Install the OpenMux local .deb packages (hardware, factory
-# X-Env-Layer-Desc: tools) into the chroot via apt, plus the distro operator
-# X-Env-Layer-Desc: tools (vim, less) at the essential phase.
-# X-Env-Layer-Version: 1.1.0
+# X-Env-Layer-Desc: tools, net tools) into the chroot via apt, plus the distro
+# X-Env-Layer-Desc: operator tools (vim, less) at the essential phase.
+# X-Env-Layer-Version: 1.2.0
 # X-Env-Layer-Provides: openmux-packages
 # METAEND
 ---
@@ -50,6 +54,7 @@ mmdebstrap:
       mkdir -p "$1/tmp/openmux-pkgs"
       cp -a "dist/pkgs/openmux-hardware_"*.deb "$1/tmp/openmux-pkgs/"
       cp -a "dist/pkgs/openmux-factory-tools_"*.deb "$1/tmp/openmux-pkgs/"
+      cp -a "dist/pkgs/openmux-net-tools_"*.deb "$1/tmp/openmux-pkgs/"
       # NOTE: the glob MUST stay quoted so it expands INSIDE the chroot
       # (apt needs the in-chroot /tmp/... paths).
       chroot "$1" sh -c 'apt-get install -y --no-install-recommends /tmp/openmux-pkgs/*.deb'

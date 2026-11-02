@@ -7,13 +7,13 @@
 # X-Env-Layer-Desc: works at network level and per netdef, so a Wi-Fi card or a
 # X-Env-Layer-Desc: cellular modem is added by naming `renderer: NetworkManager` on
 # X-Env-Layer-Desc: that one device: netplan then writes it a keyfile profile under
-# X-Env-Layer-Desc: /run and puts only it on NetworkManager's allow list, while eth0
+# X-Env-Layer-Desc: /run and puts only it on NetworkManager's allow list, while end0
 # X-Env-Layer-Desc: stays on networkd's deny list. iwd is the Supplicant behind that
 # X-Env-Layer-Desc: half. The upstream layers do the installing - network-manager
 # X-Env-Layer-Desc: adds the package and enables NetworkManager, network-manager-iwd
 # X-Env-Layer-Desc: pulls iwd and writes conf.d/iwd.conf - and this layer owns what
 # X-Env-Layer-Desc: they cannot express:
-# X-Env-Layer-Desc: (1) /etc/netplan/01-openmux.yaml, the shipped wiring: eth0 on
+# X-Env-Layer-Desc: (1) /etc/netplan/01-openmux.yaml, the shipped wiring: end0 on
 # X-Env-Layer-Desc: DHCP and `renderer: networkd` at network level. networkd is
 # X-Env-Layer-Desc: netplan(5)'s default renderer and the file states it anyway,
 # X-Env-Layer-Desc: because that key is also what starts the daemon: for every
@@ -38,17 +38,18 @@
 # X-Env-Layer-Desc: systemd-networkd.service`, and a preset applied by an upgrade is
 # X-Env-Layer-Desc: a
 # X-Env-Layer-Desc: third route to the same daemon.
-# X-Env-Layer-Desc: (3) the .network files rpi-device-base generates for networkd
-# X-Env-Layer-Desc: are
+# X-Env-Layer-Desc: (3) the .network files the engine's device layer writes for
+# X-Env-Layer-Desc: networkd, at two fixed paths, are
 # X-Env-Layer-Desc: removed. They are the daemon's own config source, read directly
 # X-Env-Layer-Desc: rather than through netplan, so a leftover adds a second DHCP
 # X-Env-Layer-Desc: client to an interface netplan already configured, and `netplan
 # X-Env-Layer-Desc: apply` does not withdraw it;
-# X-Env-Layer-Desc: (4) the null 99-default.link / 73-usb-net-by-mac.link are
-# X-Env-Layer-Desc: re-owned here. systemd-udevd applies them (systemd.link(5))
-# X-Env-Layer-Desc: whichever renderer is in use, and without them udev falls back
-# X-Env-Layer-Desc: to
-# X-Env-Layer-Desc: its NamePolicy and every interface name changes;
+# X-Env-Layer-Desc: (4) the engine's null 99-default.link / 73-usb-net-by-mac.link
+# X-Env-Layer-Desc: are kept and pinned. systemd-udevd applies them (systemd.link(5))
+# X-Env-Layer-Desc: whichever renderer is in use: masked, udev derives no name from
+# X-Env-Layer-Desc: them, so an adapter keeps the name it arrived with. They are not
+# X-Env-Layer-Desc: what names the wired port - that name is udev's, on the board, and
+# X-Env-Layer-Desc: is asserted here only as the key of the shipped netdef;
 # X-Env-Layer-Desc: (5) NetworkManager-wait-online.service is dropped out of
 # X-Env-Layer-Desc: network-online.target.wants rather than masked: `systemctl
 # X-Env-Layer-Desc: enable
@@ -59,7 +60,7 @@
 # X-Env-Layer-Desc: generator gives it, because on a networkd netdef that is the
 # X-Env-Layer-Desc: config's own answer to "is the link up", with the drop-in
 # X-Env-Layer-Desc: netplan
-# X-Env-Layer-Desc: writes limiting it to eth0. Nothing in the image Wants=
+# X-Env-Layer-Desc: writes limiting it to end0. Nothing in the image Wants=
 # X-Env-Layer-Desc: network-online.target, so neither waiter is on an ordinary boot
 # X-Env-Layer-Desc: path; only rescue-ssh.target requires it.
 # X-Env-Layer-Desc: (6) conf.d/10-openmux.conf pins the settings store to keyfile
@@ -85,14 +86,14 @@
 # X-Env-Layer-Desc: (APT::Install-Recommends=false); iwd holds the Supplicant role
 # X-Env-Layer-Desc: on
 # X-Env-Layer-Desc: nl80211 and a second one would conflict with it.
-# X-Env-Layer-Desc: eth0 has no credentials to bake and takes its address from DHCP.
+# X-Env-Layer-Desc: end0 has no credentials to bake and takes its address from DHCP.
 # X-Env-Layer-Desc: Wi-Fi and cellular are absent from the shipped file for one
 # X-Env-Layer-Desc: reason
 # X-Env-Layer-Desc: each - `wifis:` needs an SSID and a PSK, `modems:` needs the
 # X-Env-Layer-Desc: modemmanager daemon - so those netdefs arrive as site
 # X-Env-Layer-Desc: configuration, and the per-netdef renderer is what makes that a
 # X-Env-Layer-Desc: supported route rather than a change of design.
-# X-Env-Layer-Version: 1.1.0
+# X-Env-Layer-Version: 1.2.0
 # X-Env-Layer-Requires: network-manager-iwd,systemd-resolved
 # X-Env-Layer-Provides: openmux-network
 #
@@ -160,7 +161,7 @@ mmdebstrap:
 #   * masking systemd-networkd-wait-online.service. The generator pulls it into
 #     network-online.target.wants per boot, in /run, so masking it would only make
 #     the config's own verdict unreadable, and the drop-in netplan writes limits it
-#     to eth0. Nothing in the image Wants= network-online.target.
+#     to end0. Nothing in the image Wants= network-online.target.
 #   * masking iwd.service: iwd is the Wi-Fi backend, it has to run.
 #   * touching /etc/iwd/main.conf. EnableNetworkConfiguration=false is a conffile
 #     of the Debian iwd package and is what NetworkManager wants: iwd answers

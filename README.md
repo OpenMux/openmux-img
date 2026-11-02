@@ -98,19 +98,23 @@ layer/
                             naming them is the only way to choose
   openmux-network/          netplan as the network configuration surface, rendered
                             by systemd-networkd: /etc/netplan/01-openmux.yaml
-                            (eth0 on DHCP, `renderer: networkd`), NetworkManager +
+                            (end0 on DHCP, `renderer: networkd`), NetworkManager +
                             iwd kept installed and enabled for any netdef that names
                             `renderer: NetworkManager` (Wi-Fi, a modem), conf.d
                             (keyfile store, DNS left with resolved), wireguard-tools
                             for `tunnels:`. Nothing in /etc holds an opinion about
                             networkd - not masked, not wanted - because the renderer
-                            key is what starts it, per boot. Its generated .network
+                            key is what starts it, per boot. The engine's .network
                             files are removed (they would be a second DHCP client on
-                            eth0), the udev null-.link pair re-owned (that keeps
-                            eth0/wlan0 - and netplan keys eth0 by that name). Two
+                            a port netplan already configured) and its null-.link
+                            pair kept: masked, udev derives no name from them, so a
+                            USB adapter or gadget keeps the name it arrived with. The
+                            wired port's own name comes from udev matching the device
+                            on the board, which is why the cleanup hooks pin the name
+                            in the YAML rather than a name read off hardware. Two
                             cleanup hooks: one writes the state, the other runs
                             netplan-generator as systemd runs it and fails the build
-                            unless the verdict is eth0 on networkd with the daemon
+                            unless the verdict is end0 on networkd with the daemon
                             enabled for it and nothing left behind. Cleanup runs
                             after EVERY layer's customize hooks, so nothing here
                             depends on plan order
@@ -120,7 +124,8 @@ layer/
                             via the getty-generator's serial-getty@ttyAMA0
   openmux-repo/             customer APT repo (DEB822 + GPG); clean no-op without a
                             configured URI (the medium never uses it)
-  openmux-packages/         installs the local .debs (hardware, factory-tools) and the
+  openmux-packages/         installs the local .debs (hardware, factory-tools, net
+                            tools) and the
                             distro operator tools (vim, less) in the target (a
                             config-level packages: section does not exist in the
                             pinned engine; this is the documented mechanism)
@@ -142,6 +147,9 @@ hooks/                      source-tree hooks (auto-discovered, run after all la
 package/
   openmux-hardware/         udev rules (incl. /dev/serial0 bridge), hw-detect service
   openmux-factory-tools/    eeprom/serial factory utilities
+  openmux-net-tools/        set-ip, the wired address on end0 (target only: on the
+                            install medium the root is an overlay over a read-only
+                            stick, so what it wrote would be gone at the next boot)
   openmux-install-menu/     the factory boot menu (option 8 toggles the stick's
                             read-only root by rewriting the ONE line of
                             cmdline.txt - the overlayroot parameter is an image
@@ -179,7 +187,7 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 - `systemd-networkd` is neither masked nor enabled, and that is a state with two
   failure directions, both of which `om-verify.sh` checks. A mask (or any symlink
   over the unit in `/etc/systemd/system`) is the silent one: netplan would still
-  write eth0's `.network` and still ask for the daemon, systemd would refuse to
+  write end0's `.network` and still ask for the daemon, systemd would refuse to
   start a masked unit, and the board boots with no wired address while its netplan
   file reads perfectly. A `.wants` entry is the opposite one - `systemctl enable`,
   or the `enable systemd-networkd.service` line in the systemd package's own
@@ -189,17 +197,23 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   the YAML - so `systemctl enable` and `disable` are not the levers here and neither
   one wins an argument with the config.
 - Wired addressing is CONFIGURED IN NETPLAN: `/etc/netplan/01-openmux.yaml`
-  declares `eth0: dhcp4: true` with `renderer: networkd` at network level, so the
+  declares `end0: dhcp4: true` with `renderer: networkd` at network level, so the
   operator interface is one YAML file plus `netplan apply`. The key is stated
   rather than left to netplan's default (which is networkd) because it is also what
   starts the daemon, and because a site file can hand one device to NetworkManager
   by naming the renderer on that netdef alone. Nothing persists: the generator runs
-  every boot and writes `/run/systemd/network/10-netplan-eth0.network` plus a udev
-  rule putting eth0 on NetworkManager's deny list. A build-time hook runs the real
+  every boot and writes `/run/systemd/network/10-netplan-end0.network` plus a udev
+  rule putting end0 on NetworkManager's deny list. A build-time hook runs the real
   generator, in generator mode, against the config as the build left it, and fails
-  unless the verdict is eth0 configured by networkd with the daemon enabled for it.
+  unless the verdict is end0 configured by networkd with the daemon enabled for it.
   Read off the generator's output, not off the YAML, because netplan drops a file it
-  cannot parse and still exits 0 - the silence is part of the verdict.
+  cannot parse and still exits 0 - the silence is part of the verdict. The name a
+  netdef is keyed by is a match condition, not a label: the generated `[Match]`, the
+  deny rule and wait-online's `-i` argument are all derived from it, so a key that
+  does not name the port the board booted with leaves that port with no netdef and
+  nothing keeping NetworkManager off it. Which name that is can only be seen on a
+  device (`ip -br link`, `udevadm info /sys/class/net/end0`); no stage of a build
+  observes it.
   Wi-Fi is deliberately absent from the shipped file: `wifis:` needs a PSK, images
   ship no credentials - runtime nmcli + iwd as before, on a netdef that names the
   NM renderer.
@@ -224,6 +238,27 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   from the serial console, not through the SSH session it is about to drop (`netplan
   apply` disconnects the interfaces it manages first, because restarting the daemon
   alone does not reload a profile).
+- `set-ip` (from `openmux-net-tools`, target only) is how that address is changed
+  without editing YAML. It prints the merged netplan and the live address, route and
+  DNS first, then asks dhcp or static, and for static the address with its prefix
+  length, the gateway and the DNS servers. It writes one file of its own,
+  `/etc/netplan/90-openmux-end0.yaml`, and edits no other: being sorted later is
+  what makes it win the merge, and removing that one file is the way back to what
+  the image ships. Sequences cannot be taken back by a later file - netplan adds an
+  `addresses:` list to whatever an earlier file set, `addresses: []` is accepted and
+  does nothing, and `addresses: ~` is a parse error - so the file is rewritten whole
+  every run, and any other file that gives end0 an address, a route or a DNS server
+  is named on screen before anything is written, because those stay on the port.
+  Before applying it runs the real generator over the merge it is about to create,
+  in a temporary root (`netplan generate --root-dir`, which writes nothing outside
+  it), and prints the unit the daemon will be given - read off the generator, as
+  the build-time gate does, for the same reason.
+  Applying is the part that can cut the session it is typed in, so the rollback is
+  deliberately not in the tool's own process: it arms a systemd timer
+  (`openmux-set-ip-rollback`) which restores the previous file and re-applies it
+  unless Enter is pressed, and a timer owned by systemd still fires when the session
+  that armed it has been dropped by the change. If that timer cannot be armed,
+  nothing is written.
 - The device layer is the engine's built-in `rpi-cm5` (`device.layer:
   rpi-cm5`; `class: cm5`).
 - The target's primary account uses the engine's native `user1` variables

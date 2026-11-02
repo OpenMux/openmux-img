@@ -1,0 +1,35 @@
+Package: openmux-net-tools
+Version: 1.0.0
+Architecture: all
+Maintainer: OpenMux <support@openmux.io>
+Homepage: https://github.com/OpenMux
+Section: net
+Priority: optional
+Depends: netplan.io, iproute2, systemd
+Description: Operator tool for the wired address on end0
+ set-ip shows what netplan and the running system currently say about end0, asks
+ for dhcp or static, and for static asks for the address with its prefix length,
+ the gateway and the DNS servers. It writes one file of its own,
+ /etc/netplan/90-openmux-end0.yaml, and edits no other: netplan merges every file
+ in that directory per key with the lexically later file winning, so the
+ addressing the image ships in 01-openmux.yaml is overridden without touching it,
+ and removing this one file is the way back.
+ .
+ The file is rewritten whole rather than edited, because netplan merges an
+ addresses/routes/nameservers list by adding to whatever an earlier file set, and
+ a later file cannot take one away - so the files it has to coexist with are
+ reported before anything is written, and anything the tool does not ask about
+ (extra routes, search domains) belongs in a file sorted after its own.
+ .
+ Before applying it runs the real generator against the merge it is about to
+ create, in a temporary root, and prints the unit the daemon will be given.
+ Applying restarts the daemon that owns end0, which over SSH is the session the
+ command is typed in, so the rollback is a systemd timer rather than something in
+ the tool's own process: it restores the previous file and re-applies it unless the
+ operator confirms, and it still fires when the session that armed it is gone.
+ .
+ netplan.io provides the parser the file is validated with and the renderer the
+ answer is read from; iproute2 provides the live address, route and reachability
+ report; systemd provides networkctl, which says who owns the port, and
+ systemd-run, which arms the rollback. resolvectl is used to show the DNS servers
+ when systemd-resolved is present, and its absence is not fatal.

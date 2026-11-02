@@ -4,7 +4,7 @@
 #
 # cleanup10-network-stack writes /etc/netplan/01-openmux.yaml with
 # `renderer: networkd`, and that one key is the whole handover: it decides which
-# daemon configures eth0, and it also decides whether systemd-networkd is started
+# daemon configures the wired port, and it also decides whether systemd-networkd is started
 # at all, because the generator enables the daemon itself - per boot - for exactly
 # the netdefs that name it. None of that is visible in the image: every byte of it
 # lands in /run, which is a tmpfs at boot. A config that quietly ends up on another
@@ -50,6 +50,19 @@ GEN=/usr/lib/systemd/system-generators/netplan
    fail "$ROOT$GEN is not executable - netplan-generator ships it, and netplan.io is a hard dependency of the Raspberry Pi build of network-manager, so this is a package-set problem, not a netplan problem"
 [ -d "$ROOT/etc/netplan" ] ||
    fail "$ROOT/etc/netplan does not exist - cleanup10-network-stack writes the file this hook judges"
+
+# Every artifact named below is named after the netdef, so the name is read out of
+# the file rather than repeated here: the netdef key is the one fact, and a check
+# pinned to a spelling keeps passing after the key moves. Read with cleanup10's
+# shape, and checked before use, because an empty name would turn each pattern
+# below into one that matches whatever it exists to reject.
+np="$ROOT/etc/netplan/01-openmux.yaml"
+[ -f "$np" ] || fail "$np does not exist - cleanup10-network-stack writes it, and this hook judges it"
+IFACE=$(awk '/^  ethernets:/{f=1;next} f&&/^    [a-z][a-z0-9-]*:/{sub(/:.*/,"");gsub(/[[:space:]]/,"");print;exit}' "$np")
+case $IFACE in
+   ''|*[!a-z0-9-]*)
+      fail "no wired netdef could be read out of $np (read: '${IFACE:-nothing}') - every generated name asserted below is built from it, so a verdict here would mean nothing" ;;
+esac
 
 # Generator output goes to ABSOLUTE /run paths inside the root it runs in, so this
 # run does write into the image. That is the one part of the design that cannot be
@@ -121,7 +134,7 @@ mkdir -p "$ROOT$GD"
 # single netdef with an unknown key or a wrong type ('Skipping definition due to
 # parsing errors'), each time as a warning on stderr, and exits 0 with the rest of the
 # configuration written. A site file with one bad indent, or one key spelled wrong,
-# therefore leaves eth0 working and does nothing itself - at build time and at boot,
+# therefore leaves the wired port working and does nothing itself - at build time and at boot,
 # where the trace is a journal warning. Requiring silence is what makes those build
 # failures. It also covers 'Permissions for ... are too open', netplan's way of saying
 # a file that could hold a Wi-Fi passphrase or a WireGuard private key is world-readable.
@@ -131,24 +144,25 @@ if [ -s "$LOG" ]; then
 fi
 
 r="$RUN"
-net="$r/systemd/network/10-netplan-eth0.network"
+net="$r/systemd/network/10-netplan-$IFACE.network"
 
-# 1. The renderer produced its own artifact for eth0, and asked for an address.
+# 1. The renderer produced its own artifact for the wired port, and asked for an
+# address.
 [ -f "$net" ] || {
    got=$(find "$r/systemd/network" -name '*.network' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-   fail "netplan wrote no systemd-networkd config for eth0 (it wrote: ${got:-nothing}) - renderer: networkd did not take, so eth0 belongs to another daemon or to none"
+   fail "netplan wrote no systemd-networkd config for $IFACE (it wrote: ${got:-nothing}) - renderer: networkd did not take, so $IFACE belongs to another daemon or to none"
 }
 # Three properties the image promises about its wired port, in the form networkd
-# reads them: the file is about eth0 by name, it requests rather than assigns an
+# reads them: the file is about $IFACE by name, it requests rather than assigns an
 # address, and it does not turn the DNS off. The last is the quiet one - with
 # UseDNS=false networkd still gets an address and still never tells resolved the
 # nameservers, so the device is "up" and resolves nothing.
-grep -qx 'Name=eth0' "$net" ||
-   fail "the generated eth0 config does not match the interface by name: $(tr '\n' ' ' < "$net")"
+grep -qx "Name=$IFACE" "$net" ||
+   fail "the generated config for $IFACE does not match the interface by name: $(tr '\n' ' ' < "$net")"
 grep -qx 'DHCP=ipv4' "$net" ||
-   fail "the generated eth0 config does not request its address over DHCP: $(tr '\n' ' ' < "$net")"
+   fail "the generated config for $IFACE does not request its address over DHCP: $(tr '\n' ' ' < "$net")"
 if grep -Eq '^[[:space:]]*UseDNS=false' "$net"; then
-   fail "the generated eth0 config sets UseDNS=false: resolved would never learn the nameservers, and DNS would fail on a link that looks connected"
+   fail "the generated config for $IFACE sets UseDNS=false: resolved would never learn the nameservers, and DNS would fail on a link that looks connected"
 fi
 
 # 2. The daemon gets started for it. This is the part that exists only in the
@@ -158,17 +172,24 @@ fi
 # generator search path at boot, not against this build host.
 en="$ROOT$GD/multi-user.target.wants/systemd-networkd.service"
 [ -L "$en" ] ||
-   fail "netplan enabled neither systemd-networkd nor an alternative for eth0: no wants entry was generated, so nothing would start a daemon to apply $(basename "$net")"
+   fail "netplan enabled neither systemd-networkd nor an alternative for $IFACE: no wants entry was generated, so nothing would start a daemon to apply $(basename "$net")"
 
 # 3. Only one daemon ends up owning the port. For a networkd netdef netplan puts
 # the interface on NetworkManager's DENY list through udev, so NetworkManager -
 # still installed, still enabled, still the owner of anything wireless - keeps off
-# eth0; and no NM profile for it exists.
+# $IFACE; and no NM profile for it exists. Both come from the netdef name, which is
+# why that name is derived above instead of repeated here: keyed to a name the port
+# does not have, netplan denies that name and nothing keeps the daemon off the port
+# that is really there.
 rules="$r/udev/rules.d/90-netplan.rules"
-grep -Eq 'ID_NET_NAME\}=="eth0".*NM_UNMANAGED\}="1"' "$rules" 2>/dev/null ||
-   fail "eth0 is not on NetworkManager's deny list in $(basename "$rules"): $(printf '%s' "$(grep 'eth0' "$rules" 2>/dev/null | tr '\n' ' ')") - two daemons with one DHCP client each on the same link is what the deny list exists to prevent"
-if [ -e "$r/NetworkManager/system-connections/netplan-eth0.nmconnection" ]; then
-   fail "netplan produced a NetworkManager profile for eth0 as well as networkd's config - eth0 would be configured twice"
+# Collected before the verdict, not inside it: a command substitution in the
+# message would need quotes nested three deep, and grep exits 1 on no match, which
+# set -e would take as the hook's own failure rather than as the description of one.
+deny=$(grep -F "$IFACE" "$rules" 2>/dev/null | tr '\n' ' ' || true)
+grep -Eq "ID_NET_NAME\}==\"$IFACE\".*NM_UNMANAGED\}=\"1\"" "$rules" 2>/dev/null ||
+   fail "$IFACE is not on NetworkManager's deny list in $(basename "$rules"): ${deny:-no rule mentions it} - two daemons with one DHCP client each on the same link is what the deny list exists to prevent"
+if [ -e "$r/NetworkManager/system-connections/netplan-$IFACE.nmconnection" ]; then
+   fail "netplan produced a NetworkManager profile for $IFACE as well as networkd's config - $IFACE would be configured twice"
 fi
 
 undo
@@ -177,7 +198,8 @@ if ! cmp -s "$BEFORE" "$AFTER"; then
    fail "left behind in /run by this run and not removable: $(comm -13 "$BEFORE" "$AFTER" | tr '\n' ' ') - those files describe a boot that has not happened and would ship inside the image"
 fi
 
-printf 'openmux-network: netplan renders eth0 into systemd-networkd (%s), enables the daemon for it, keeps NetworkManager off it, and left the image as it found it\n' \
+printf 'openmux-network: netplan renders %s into systemd-networkd (%s), enables the daemon for it, keeps NetworkManager off it, and left the image as it found it\n' \
+   "$IFACE" \
    "${net#$ROOT/}" >&2
 
 exit 0

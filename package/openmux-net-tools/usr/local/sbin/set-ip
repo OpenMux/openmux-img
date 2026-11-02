@@ -1,0 +1,590 @@
+#!/usr/bin/env bash
+# set-ip - give this box a fixed IPv4 address on end0, or hand it back to DHCP.
+#
+# One file is written, /etc/netplan/90-openmux-end0.yaml, and no other file is
+# edited. netplan merges every file in /etc/netplan per key with the lexically
+# later file winning, so this file overrides the addressing the image ships in
+# 01-openmux.yaml without touching that file or the renderer it names: what the
+# build wrote and what this box was told stay separable, and removing this one
+# file is the way back.
+#
+# The file is rewritten whole rather than edited, because of how netplan merges
+# sequences. An addresses/routes/nameservers list is ADDED TO when a later file
+# also sets one, and a later file cannot take one away: `addresses: []` is
+# accepted and does nothing, `addresses: ~` is a parse error. So each run's output
+# has to stand on its own, and any other file that already puts an address, a route
+# or a DNS server on end0 is reported before anything is written, because those
+# stay on the port whatever is written here.
+#
+# Nothing is live until netplan applies it, and applying restarts the daemon that
+# owns end0 - over SSH that is the session this is typed in. So the rollback is
+# deliberately not in this process: applying arms a systemd timer that restores the
+# previous file and re-applies it unless the operator confirms, and that timer
+# belongs to systemd, so it still fires when the session that armed it is gone.
+# Confirming it off is the last step of a successful run. The timer is in RAM: a box
+# that reboots before it fires keeps whatever is on disk.
+#
+# Mode 0600 on the file is not tidiness - a looser mode makes netplan warn from the
+# generator that runs on every boot, in the journal of every device.
+#
+# Usage:
+#   set-ip                  show the current configuration, ask, write, apply
+#   set-ip --print          show the current configuration and change nothing
+#   set-ip --timeout SECS   how long the automatic rollback waits (default 120)
+#   set-ip --rollback       restore the staged previous file and re-apply; this is
+#                           what the rollback timer runs, not a command to type
+set -uo pipefail
+
+# end0 is the name udev gives this board's wired port, and a netdef is matched on
+# its key, so the name has to be the one `ip -br link` shows. IFACE is overridable
+# for a box that names it differently; everything below, including the file name,
+# is built from it, so one value cannot describe a port another one names.
+IFACE=${IFACE:-end0}
+# NETPLAN_DIR, NETPLAN_ROOT and SELF exist so a test can source this file and point
+# it at a tree in /tmp. On a device none of them is set and the defaults are used.
+NETPLAN_DIR=${NETPLAN_DIR:-/etc/netplan}
+NETPLAN_ROOT=${NETPLAN_ROOT:-/}
+SELF=${SELF:-/usr/local/sbin/set-ip}
+OWN_FILE_NAME=90-openmux-${IFACE}.yaml
+STATE_DIR=${STATE_DIR:-/var/lib/openmux-set-ip}
+ROLLBACK_UNIT=openmux-set-ip-rollback
+ROLLBACK_SECS=120
+# Filled by the questions.
+ANSWER= WHY= MODE=dhcp ADDR= GW= NS=
+
+die() { printf 'set-ip: %s\n' "$1" >&2; exit 1; }
+warn() { printf 'set-ip: warning: %s\n' "$1" >&2; }
+own_file() { printf '%s/%s\n' "$NETPLAN_DIR" "$OWN_FILE_NAME"; }
+
+# --- validation -------------------------------------------------------------
+# a.b.c.d -> its 32-bit value, non-zero exit on anything this tool will not
+# install. Each octet is compared with its own decimal value, which is also what
+# rejects a leading zero: `10.0.0.08` is octal to some parsers and decimal to
+# others, and an address nobody agrees on is not worth putting on a wire.
+ip2int() {
+  local ip=$1 o n=0
+  [[ $ip =~ ^[0-9]{1,3}\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+  local IFS=.
+  for o in $ip; do
+    [[ $o == "$((10#$o))" ]] || return 1
+    (( o <= 255 )) || return 1
+    n=$(( n * 256 + o ))
+  done
+  printf '%s\n' "$n"
+}
+
+int_to_ip() {
+  local n=$1
+  printf '%d.%d.%d.%d\n' $(( (n >> 24) & 255 )) $(( (n >> 16) & 255 )) \
+                 $(( (n >> 8) & 255 )) $(( n & 255 ))
+}
+
+# 255.255.255.0 -> 24, so an operator who thinks in netmasks is not stuck.
+# Non-contiguous masks are rejected: with the one bits split there is no network
+# address, and every comparison below would be comparing something meaningless.
+netmask_to_prefix() {
+  local n x t=0 p
+  n=$(ip2int "${1:-}") || return 1
+  x=$n
+  while (( x != 0 && (x & 1) == 0 )); do t=$(( t + 1 )); x=$(( x >> 1 )); done
+  p=$(( 32 - t ))
+  (( x == (1 << p) - 1 )) || return 1
+  printf '%s\n' "$p"
+}
+
+# Reason on stdout, non-zero exit: the caller shows it and asks again.
+check_method() {
+  [[ $1 == dhcp || $1 == static ]] ||
+    { printf 'answer dhcp or static (dhcp hands the port back to the network)\n'; return 1; }
+  return 0
+}
+
+check_address() {
+  local whole=$1 a=${1%%/*} p=${1##*/} n bits net bcast
+  [[ $whole == */* ]] ||
+    { printf 'no prefix length; give it as 192.168.1.50/24 (or type the netmask to see its length)\n'; return 1; }
+  [[ $whole == */*/* ]] &&
+    { printf '%s is not one address with one prefix length; use the form 192.168.1.50/24\n' "$whole"; return 1; }
+  if [[ $p =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    if p=$(netmask_to_prefix "$p"); then
+      printf 'that netmask is /%s; give the length: %s/%s\n' "$p" "$a" "$p"
+    else
+      printf '%s is not a netmask (its bits are not one contiguous run)\n' "${whole#*/}"
+    fi
+    return 1
+  fi
+  n=$(ip2int "$a") || { printf '%s is not an IPv4 address\n' "$a"; return 1; }
+  [[ $p =~ ^[0-9]{1,2}$ ]] || { printf '%s is not a prefix length\n' "$p"; return 1; }
+  p=$(( 10#$p ))
+  (( p >= 8 && p <= 32 )) ||
+    { printf '/%s: this port needs a prefix between /8 and /32\n' "$p"; return 1; }
+  bits=$(( 32 - p ))
+  net=$(( (n >> bits) << bits ))
+  bcast=$(( net + (1 << bits) - 1 ))
+  # /31 and /32 reserve no address, so both checks below are for the rest.
+  if (( bits >= 2 )); then
+    (( n == net )) &&
+      { printf '%s is the network address of %s/%s; hosts are %s to %s\n' \
+          "$a" "$(int_to_ip "$net")" "$p" "$(int_to_ip $(( net + 1 )))" "$(int_to_ip $(( bcast - 1 )))"; return 1; }
+    (( n == bcast )) &&
+      { printf '%s is the broadcast address of %s/%s; hosts are %s to %s\n' \
+          "$a" "$(int_to_ip "$net")" "$p" "$(int_to_ip $(( net + 1 )))" "$(int_to_ip $(( bcast - 1 )))"; return 1; }
+  fi
+  return 0
+}
+
+check_gateway() {
+  local g=${1:-}
+  [[ -n $g ]] || return 0                 # empty means "no default route", which is asked for
+  ip2int "$g" >/dev/null ||
+    { printf '%s is not an IPv4 address; a gateway has no prefix length on it\n' "$g"; return 1; }
+  return 0
+}
+
+check_nameserver() {
+  local s=$1
+  ip2int "$s" >/dev/null && return 0
+  # Anything IPv6-shaped is left to netplan's parser, which rejects a bad one with
+  # a non-zero exit; a second grammar here would only be wrong in another place.
+  [[ $s == *:* ]] && return 0
+  printf '%s is not an IPv4 address\n' "$s"; return 1
+}
+
+# Non-zero when the gateway is not on the address's network: writable, and
+# unreachable without another route, so it is asked about rather than accepted or
+# refused in silence. No gateway is never off-subnet, so it answers false.
+gateway_off_subnet() {
+  local an gn bits
+  [[ -n $GW ]] || return 1
+  an=$(ip2int "${ADDR%%/*}") || return 1
+  gn=$(ip2int "$GW") || return 1
+  bits=$(( 32 - ${ADDR##*/} ))
+  (( (an >> bits) != (gn >> bits) ))
+}
+
+# --- prompting --------------------------------------------------------------
+# A prompt nothing can see is a hang, not a question, so the prompt text goes to
+# stderr by hand; main also refuses to run at all when stdin is not a terminal,
+# which is where the answers come from.
+ask() { # ask "label" ["default"] -> ANSWER
+  local label=$1 dflt=${2:-} a
+  printf '%s%s: ' "$label" "$( [[ -n $dflt ]] && printf ' [%s]' "$dflt" )" >&2
+  IFS= read -r a || die 'no input on stdin'
+  a=${a#"${a%%[![:space:]]*}"}
+  a=${a%"${a##*[![:space:]]}"}
+  ANSWER=${a:-$dflt}
+}
+
+ask_checked() { # ask_checked "label" checker "default" -> ANSWER, repeating until it passes
+  local label=$1 checker=$2 dflt=${3:-}
+  while :; do
+    ask "$label" "$dflt"
+    WHY=$("$checker" "$ANSWER") && return 0
+    printf '        %s\n' "$WHY" >&2
+  done
+}
+
+ask_yn() { # ask_yn "label" "Y|N" -> ANSWER = y or n
+  local label=$1 dflt=$2
+  while :; do
+    ask "$label" "$dflt"
+    case ${ANSWER,,} in
+      y|yes) ANSWER=y; return 0 ;;
+      n|no)  ANSWER=n; return 0 ;;
+      *) printf '        answer y or n\n' >&2 ;;
+    esac
+  done
+}
+
+# Space separated list, every item checked, duplicates dropped in the order given.
+ask_nameservers() {
+  local s out
+  while :; do
+    ask 'DNS servers, space separated (empty for none)'
+    out=''
+    WHY=''
+    for s in $ANSWER; do
+      WHY=$(check_nameserver "$s") || break
+      [[ $out == *" $s "* ]] && continue
+      out="$out $s"
+    done
+    [[ -n $WHY ]] || { NS=${out# }; return 0; }
+    printf '        %s\n' "$WHY" >&2
+  done
+}
+
+# --- what is configured now -------------------------------------------------
+print_current() {
+  local out f
+  printf '%s now\n' "$IFACE"
+  # `netplan get` reads the directory the way the generator does, so this is the
+  # merged answer and not one file's opinion. It is also one of the few places
+  # where a file netplan cannot use is reported loudly instead of dropped.
+  out=$(netplan get --root-dir "$NETPLAN_ROOT" ethernets."$IFACE" 2>&1)
+  if [[ $out == *'Command failed'* ]]; then
+    printf '  netplan: cannot read %s: %s\n' "$NETPLAN_DIR" "${out#*Command failed: }"
+  elif [[ -z $out || $out == null ]]; then
+    printf '  netplan: nothing names %s in %s\n' "$IFACE" "$NETPLAN_DIR"
+  else
+    printf '  netplan (merged %s):\n' "$NETPLAN_DIR"
+    printf '%s\n' "$out" | sed 's/^/      /'
+  fi
+  f=$(own_file)
+  if [[ -f $f ]]; then
+    printf '  this tool wrote: %s\n' "$f"
+    sed 's/^/      /' "$f"
+  else
+    printf '  this tool wrote: nothing (%s absent)\n' "$f"
+  fi
+  # An address can come from somewhere netplan does not know about, so the live
+  # state is printed alongside the configured one rather than instead of it.
+  out=$(networkctl status "$IFACE" 2>/dev/null |
+        sed -n 's/^[[:space:]]*Network Method:[[:space:]]*//p' | head -n1)
+  printf '  configured by: %s\n' "${out:-(networkctl says nothing)}"
+  out=$(ip -4 addr show dev "$IFACE" 2>/dev/null | sed -n 's/^ *\(inet .*\)/      \1/p')
+  printf '  live addresses:\n%s\n' "${out:-      (none)}"
+  out=$(ip -4 route show default dev "$IFACE" 2>/dev/null | sed 's/^/      /')
+  printf '  live default route:\n%s\n' "${out:-      (none)}"
+  out=$(resolvectl dns 2>/dev/null |
+        awk -v i="$IFACE" '
+          /^Link [0-9]+ \(/{ sub(/^Link [0-9]+ \(/, ""); sub(/\).*/, ""); inh = ($0 == i) }
+          inh && /DNS Servers:/ { sub(/^[[:space:]]*DNS Servers:[[:space:]]*/, ""); print }')
+  printf '  dns (systemd-resolved): %s\n' "${out:-(nothing reported)}"
+}
+
+# Files other than this one that put a static address, a route or a DNS server on
+# $IFACE. Decided by rendering each file on its own with the real parser rather than
+# by pattern-matching YAML: the question is what netplan concludes from the file,
+# and the rendered unit is what the daemon is given. A file rendered for
+# NetworkManager counts too, since that is how such a file would take the port.
+other_files_with_static_ip() {
+  local f root nf nm hit
+  for f in "$NETPLAN_DIR"/*.yaml; do
+    [[ -e $f ]] || continue
+    [[ $(basename "$f") == "$OWN_FILE_NAME" ]] && continue
+    root=$(mktemp -d) || continue
+    mkdir -p "$root/etc/netplan" "$root/run"
+    if cp -p "$f" "$root/etc/netplan/" 2>/dev/null; then
+      netplan generate --root-dir "$root" >/dev/null 2>&1
+      nf=$root/run/systemd/network/10-netplan-$IFACE.network
+      nm=$root/run/NetworkManager/system-connections/netplan-$IFACE.nmconnection
+      hit=''
+      [[ -f $nf ]] && grep -qE '^(Address=|DNS=|\[Route\])' "$nf" && hit=yes
+      [[ -f $nm ]] && grep -qiE '^(address[0-9]*=|dns=|gateway=)' "$nm" && hit=yes
+      [[ -n $hit ]] && printf '%s\n' "$f"
+    fi
+    rm -rf "$root"
+  done
+}
+
+# --- the file ---------------------------------------------------------------
+# $1 static address, $2 gateway (may be empty), $3 nameservers (space separated).
+yaml_for_static() {
+  local a=$1 g=$2 ns=$3 n
+  cat <<EOF
+# ${OWN_FILE_NAME} - ${IFACE} addressing, written by set-ip on $(date -u '+%Y-%m-%d %H:%M:%S UTC').
+#
+# netplan merges every file in this directory per key, and this one sorts after
+# 01-openmux.yaml, so this is what ${IFACE} uses; nothing else there was touched.
+# set-ip rewrites this file whole, so an edit made here by hand is gone the next
+# time it runs: extra routes, search domains, or anything else it does not ask
+# about belongs in a file sorted after this one, e.g. 95-site.yaml.
+#
+# Back to the configuration the image ships: rm this file, then `netplan apply`.
+network:
+  version: 2
+  ethernets:
+    ${IFACE}:
+      dhcp4: false
+      addresses:
+        - ${a}
+EOF
+  [[ -n $g ]] && printf '      routes:\n        - to: default\n          via: %s\n' "$g"
+  if [[ -n $ns ]]; then
+    printf '      nameservers:\n        addresses:\n'
+    for n in $ns; do printf '          - %s\n' "$n"; done
+  fi
+}
+
+# The real parser, on the real merge, with nothing of the box touched: generate
+# --root-dir reads and writes only under the directory it is given. The rendered
+# unit is what gets shown, because it answers "what will be configured" after
+# every file in the directory has been merged, which a YAML file on its own does
+# not. $1 = candidate file, or - for "this file absent".
+render_with() {
+  local cand=$1 root rc log nf nm line f
+  root=$(mktemp -d) || die 'cannot create a temporary directory'
+  mkdir -p "$root/etc/netplan" "$root/run"
+  for f in "$NETPLAN_DIR"/*.yaml; do
+    [[ -e $f ]] || continue
+    [[ $(basename "$f") == "$OWN_FILE_NAME" ]] && continue
+    cp -p "$f" "$root/etc/netplan/" || { rm -rf "$root"; die "cannot copy $f"; }
+  done
+  if [[ $cand != - ]]; then
+    cp -p "$cand" "$root/etc/netplan/$OWN_FILE_NAME" ||
+      { rm -rf "$root"; die 'cannot stage the new file'; }
+  fi
+  log=$root/log
+  netplan generate --root-dir "$root" >"$log" 2>&1
+  rc=$?
+  nf=$root/run/systemd/network/10-netplan-$IFACE.network
+  nm=$root/run/NetworkManager/system-connections/netplan-$IFACE.nmconnection
+  # Anything naming this file, or a non-zero exit, stops the run. Other lines are
+  # shown and not judged: they come from files this tool does not own, and from
+  # systemctl wherever netplan is run somewhere systemd is not PID 1.
+  if (( rc != 0 )) || { [[ -s $log ]] && grep -q "$OWN_FILE_NAME" "$log"; }; then
+    printf 'set-ip: netplan cannot use the configuration this would produce:\n' >&2
+    [[ -s $log ]] && sed 's/^/    /' "$log" >&2
+    rm -rf "$root"
+    return 1
+  fi
+  if [[ -s $log ]]; then
+    while IFS= read -r line; do
+      [[ -n $line ]] && printf 'set-ip: %s\n' "$line" >&2
+    done < "$log"
+  fi
+  if [[ -f $nf ]]; then
+    printf '  systemd-networkd will be told:\n'
+    sed 's/^/      /' "$nf"
+  elif [[ -f $nm ]]; then
+    printf '  NetworkManager will be told (a renderer for NetworkManager was merged for this port):\n'
+    sed 's/^/      /' "$nm"
+  else
+    printf 'set-ip: netplan produced no configuration for %s, so nothing would own it\n' "$IFACE" >&2
+    rm -rf "$root"
+    return 1
+  fi
+  rm -rf "$root"
+  return 0
+}
+
+# --- writing and applying ---------------------------------------------------
+previous_is_removal() { [[ -f "$STATE_DIR/previous-absent" ]]; }
+
+stage_previous() {
+  local f
+  f=$(own_file)
+  rm -rf "${STATE_DIR:?}"/* 2>/dev/null
+  install -d -m 0700 -o root -g root "$STATE_DIR" || die "cannot create $STATE_DIR"
+  if [[ -f $f ]]; then
+    cp -p "$f" "$STATE_DIR/previous.yaml" || die "cannot stage a copy of $f"
+  else
+    : > "$STATE_DIR/previous-absent" || die "cannot stage a copy of $f"
+  fi
+}
+
+disarm_rollback() {
+  systemctl stop "$ROLLBACK_UNIT.service" 2>/dev/null
+  rm -rf "${STATE_DIR:?}"/* 2>/dev/null
+}
+
+arm_rollback() {
+  # Stopping first covers a run that was never confirmed: two armed rollbacks would
+  # both restore, and the second the file the first one put back.
+  systemctl stop "$ROLLBACK_UNIT.service" 2>/dev/null
+  systemd-run --quiet --collect --unit="$ROLLBACK_UNIT" --on-active="${ROLLBACK_SECS}s" \
+    "$SELF" --rollback
+}
+
+restore_previous() {
+  local f
+  f=$(own_file)
+  [[ -d $STATE_DIR ]] || die "no staged state in $STATE_DIR - nothing to restore"
+  if previous_is_removal; then
+    rm -f "$f"
+  elif [[ -f $STATE_DIR/previous.yaml ]]; then
+    install -m 0600 -o root -g root "$STATE_DIR/previous.yaml" "$f" ||
+      die "cannot restore $f"
+  else
+    die "nothing staged in $STATE_DIR"
+  fi
+  rm -rf "${STATE_DIR:?}"/*
+}
+
+rollback() {
+  # Runs from the timer, where there is no terminal and nobody is watching: it has
+  # to work from the staged file alone.
+  restore_previous
+  netplan apply ||
+    die "restored $(own_file) but netplan apply failed - $IFACE may need the serial console"
+  printf 'set-ip: rolled back; %s is back on its previous configuration\n' "$IFACE"
+}
+
+print_reach() {
+  local out a
+  out=$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+  a=${out%%/*}
+  if [[ -n $a ]]; then
+    printf '%s is reachable at %s (ssh admin@%s)\n' "$(hostname)" "$out" "$a"
+  else
+    printf '%s has no IPv4 address on %s: the serial console reaches it\n' "$(hostname)" "$IFACE"
+  fi
+}
+
+collect_answers() {
+  local dflt
+  if [[ -f $(own_file) ]]; then dflt=static; else dflt=dhcp; fi
+  ask_checked "Method for $IFACE (dhcp or static)" check_method "$dflt"
+  MODE=$ANSWER
+  [[ $MODE == static ]] || return 0
+  ask_checked "IPv4 address with prefix length (e.g. 192.168.1.50/24)" check_address
+  ADDR=$ANSWER
+  ask_checked 'Gateway (empty for none)' check_gateway ''
+  GW=$ANSWER
+  if gateway_off_subnet; then
+    printf 'set-ip: %s is not on the network of %s, so nothing reaches it without a route of its own\n' \
+           "$GW" "$ADDR" >&2
+    ask_yn 'Write it anyway?' n
+    [[ $ANSWER == y ]] || die 'nothing written'
+  fi
+  ask_nameservers
+}
+
+# --- entry points -----------------------------------------------------------
+do_print() {
+  command -v netplan >/dev/null || die 'netplan is not installed'
+  print_current
+}
+
+do_rollback() {
+  command -v netplan >/dev/null || die 'netplan is not installed'
+  [[ $EUID -eq 0 ]] || die 'the rollback writes /etc/netplan: it must run as root'
+  rollback
+}
+
+usage() { sed -n '/^# Usage:/,/^set -uo/p' "$SELF_SRC" | sed '/^set -uo/d; s/^# \{0,1\}//'; }
+
+main() {
+  local SELF_SRC=$0 mode=interact others cand apply kept
+
+  while (($#)); do
+    case $1 in
+      --print)    mode=print; shift ;;
+      --rollback) mode=rollback; shift ;;
+      --timeout)  [[ ${2:-} =~ ^[0-9]+$ ]] || die '--timeout wants a number of seconds'
+                  ROLLBACK_SECS=$(( 10#$2 ))
+                  (( ROLLBACK_SECS >= 30 )) || die '--timeout: 30 s is the shortest useful window'
+                  shift 2 ;;
+      -h|--help)  usage; return 0 ;;
+      *)          die "unknown argument: $1 (--help for use)" ;;
+    esac
+  done
+
+  case $mode in
+    print)    do_print; return 0 ;;
+    rollback) do_rollback; return 0 ;;
+  esac
+
+  command -v netplan >/dev/null || die 'netplan is not installed'
+  command -v ip >/dev/null || die 'ip (iproute2) is not installed'
+  command -v systemd-run >/dev/null || die 'systemd-run is needed to arm the automatic rollback'
+  [[ $EUID -eq 0 ]] || die 'this writes /etc/netplan and applies it: run it as root'
+  [[ -t 0 ]] || die 'this asks questions and needs a terminal; --print changes nothing and needs none'
+
+  # First thing, before anything is asked or written: what this port does now.
+  print_current
+  printf '\n'
+
+  others=$(other_files_with_static_ip)
+  if [[ -n $others ]]; then
+    printf 'set-ip: these files already give %s an address, a route or a DNS server of their own:\n' "$IFACE" >&2
+    printf '        %s\n' $others >&2
+    printf '        netplan adds those to what is written here instead of replacing them,\n' >&2
+    printf '        so they stay on the port. Take them out of those files if they are not wanted.\n' >&2
+  fi
+
+  collect_answers
+
+  if [[ $MODE == static ]]; then
+    cand=$(mktemp) || die 'cannot create a temporary file'
+    yaml_for_static "$ADDR" "$GW" "$NS" > "$cand" || die 'cannot build the file'
+  else
+    cand=-
+  fi
+
+  printf '\nThe configuration this produces:\n'
+  if [[ $cand == - ]]; then
+    if [[ -f $(own_file) ]]; then
+      printf '  %s is removed, and %s goes back to what the other files in %s say\n' \
+             "$(own_file)" "$IFACE" "$NETPLAN_DIR"
+    else
+      # dhcp with nothing of ours to remove is the state the image ships: applying
+      # that would only interrupt a working port to arrive at the same address.
+      printf 'Nothing to do: %s is absent, so %s is already configured by the files in %s,\n' \
+             "$(own_file)" "$IFACE" "$NETPLAN_DIR"
+      printf 'which this tool does not touch. To restart the port anyway, run `netplan apply`.\n'
+      return 0
+    fi
+  else
+    sed 's/^/  /' "$cand"
+  fi
+  printf '  merged with the rest of %s, netplan renders:\n' "$NETPLAN_DIR"
+  render_with "$cand" || die 'nothing written'
+
+  printf '\n'
+  ask_yn 'Apply now?' y
+  apply=$ANSWER
+
+  if [[ $apply == n ]]; then
+    if [[ $cand == - ]]; then
+      rm -f "$(own_file)" || die "could not remove $(own_file)"
+      printf 'removed %s. %s keeps its live address until `netplan apply` runs or the box\n' \
+             "$(own_file)" "$IFACE"
+      printf 'reboots, and at either of those points it is configured by the files that remain.\n'
+    else
+      install -m 0600 -o root -g root "$cand" "$(own_file)" || die 'cannot write the file'
+      rm -f "$cand"
+      printf 'written: %s\n' "$(own_file)"
+      printf '%s keeps its live address until `netplan apply` runs or the box reboots, and\n' "$IFACE"
+      printf 'nothing undoes it after that. Undo instead: rm %s\n' "$(own_file)"
+    fi
+    return 0
+  fi
+
+  # From here the change is real, so the way back has to exist first.
+  stage_previous
+  if ! arm_rollback; then
+    disarm_rollback
+    rm -f "$cand"
+    die "could not arm the automatic rollback ($ROLLBACK_UNIT): nothing was written, because a change this box cannot undo on its own is not one to make over the network"
+  fi
+  if [[ $cand == - ]]; then
+    rm -f "$(own_file)" || { restore_previous; die "could not remove $(own_file)"; }
+  else
+    install -m 0600 -o root -g root "$cand" "$(own_file)" ||
+      { restore_previous; die 'cannot write the file'; }
+    rm -f "$cand"
+  fi
+
+  printf '\nApplying. %s is briefly down while its daemon is restarted.\n' "$IFACE"
+  printf 'If this session does not survive it, there is nothing to do: in %s s the previous\n' "$ROLLBACK_SECS"
+  printf 'configuration is put back and applied by itself.\n'
+  if ! netplan apply; then
+    warn 'netplan apply failed - putting the previous configuration back'
+    restore_previous
+    netplan apply || warn 'the second netplan apply failed too: use the serial console'
+    disarm_rollback
+    die 'the previous configuration is in place again'
+  fi
+
+  printf '\nPress Enter to keep this configuration. Waiting past %s s lets the armed rollback\n' "$ROLLBACK_SECS"
+  if previous_is_removal; then
+    printf 'put %s back instead.\n' "$(own_file)"
+  else
+    printf 'restore the previous %s instead.\n' "$(own_file)"
+  fi
+  kept=y
+  IFS= read -r -t "$ROLLBACK_SECS" _ || kept=n
+  if [[ $kept == y ]]; then
+    disarm_rollback
+    printf '\nKept: %s\n' "$(own_file)"
+  else
+    printf '\nNot confirmed: the rollback stays armed and %s goes back on its own.\n' "$IFACE"
+  fi
+  print_reach
+}
+
+# Sourced by a test rather than executed: the functions above are the surface.
+if [[ ${BASH_SOURCE[0]} == "${0:-}" ]]; then
+  main "$@"
+fi

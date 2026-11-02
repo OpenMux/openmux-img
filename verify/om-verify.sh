@@ -65,6 +65,15 @@ is_wanted() { # is_wanted <root> <target> <unit>  - enabled = a .wants symlink.
   [ -L "$1/etc/systemd/system/$2.target.wants/$3" ]
 }
 
+# The wired port as the image ships it: the key of the netdef in
+# /etc/netplan/01-openmux.yaml, which is also the name udev gives this board's
+# port. The two names pinned below - that key, and the file set-ip derives from it -
+# are built from this value, so a rename is one line here rather than an agreement
+# between checks. The name itself belongs to the hardware and cannot be observed in
+# an image: what is asserted is that the shipped config keys one name consistently
+# and that the generator was run over it.
+WIRED=end0
+
 # The network stack the openmux-network layer builds, asserted on the finished
 # image. File state is the only thing observable without booting, and the halves
 # have to be checked together: netplan states the configuration, the renderer key
@@ -87,7 +96,7 @@ network_stack() { # network_stack <root> <label>
   # The same three absences the build hook asserts, read off the image. Each is a
   # different way for /etc to outrank the renderer key, and none of them is visible
   # in the YAML that outranking it defeats: a symlink to /dev/null makes the daemon
-  # unstartable (netplan still writes eth0's .network, systemd still refuses to run
+  # unstartable (netplan still writes the wired port's .network, systemd still refuses to run
   # it, the port comes up with no address); any other symlink in that directory
   # replaces or aliases the unit; and a .wants entry - from a hand `systemctl
   # enable` or from 90-systemd.preset, which ships `enable systemd-networkd.service`
@@ -125,20 +134,25 @@ network_stack() { # network_stack <root> <label>
   is_absent "$r/etc/systemd/system/network-online.target.wants/NetworkManager-wait-online.service" \
     && ok "$t: NetworkManager-wait-online is not wanted (no 60 s boot ceiling)" \
     || bad "$t: NetworkManager-wait-online.service is wanted by network-online.target"
-  # The .network files rpi-device-base generates have to be gone as well.
+  # The .network files the engine's device layer generates have to be gone as well.
   # /etc/systemd/network is networkd's own config source, read directly rather than
-  # through netplan, so 01-eth0.network describes the same port as netplan's generated
-  # /run/systemd/network/10-netplan-eth0.network: two DHCP clients, two sets of
-  # routes, and `netplan apply` neither reads nor removes the /etc one.
+  # through netplan, so one of those files describes the same port as netplan's
+  # generated /run/systemd/network/10-netplan-$WIRED.network: two DHCP clients, two
+  # sets of routes, and `netplan apply` neither reads nor removes the /etc one. The
+  # two names below are the engine's, fixed in layer/rpi/device/family-base.yaml, and
+  # are not the board's - which is why both go.
   for u in 01-eth0.network 02-wlan0.network; do
     is_absent "$r/etc/systemd/network/$u" && ok "$t: /etc/systemd/network/$u removed" \
       || bad "$t: /etc/systemd/network/$u still present"
   done
-  # udev applies these, not networkd: without them the interfaces stop being
-  # eth0/wlan0 and every ifname= match and operator habit moves with them.
+  # The engine's null .link pair, kept as it shipped them: masked, udev parses no
+  # NamePolicy from them, so a USB adapter or gadget keeps the name it arrived with -
+  # the state a provisioning adapter has to keep for whoever plugs it in. The wired
+  # port's name is not one of the things they produce, and $WIRED is pinned from the
+  # YAML rather than from here.
   for u in 99-default.link 73-usb-net-by-mac.link; do
-    is_masked "$r/etc/systemd/network/$u" && ok "$t: $u still disabled (names stay kernel's)" \
-      || bad "$t: /etc/systemd/network/$u is not a null link - interface names will change"
+    is_masked "$r/etc/systemd/network/$u" && ok "$t: $u still disabled (udev names nothing from it)" \
+      || bad "$t: /etc/systemd/network/$u is not a null link - the names it does cover will change"
   done
   # DNS: NM's conf names resolved, so resolved has to be there and own the file.
   is_wanted "$r" sysinit systemd-resolved.service \
@@ -149,7 +163,7 @@ network_stack() { # network_stack <root> <label>
   # Wiring is configured in netplan, so this file is load-bearing in a way it is not
   # for a daemon that reads its own config directory: everything it says reaches the
   # daemon through the generator, at boot, into /run. If the generator is missing, or
-  # the file does not name a renderer for eth0, nothing configures the port - and
+  # the file does not name a renderer for the wired port, nothing configures it - and
   # nothing in /etc betrays it, because netplan's output is a tmpfs by the time anyone
   # can look. The layer's cleanup20-netplan-render runs the generator at build time;
   # what is pinned here is what survived into the image:
@@ -176,8 +190,8 @@ network_stack() { # network_stack <root> <label>
   [ -x "$r/usr/lib/systemd/system-generators/netplan" ] \
     && ok "$t: netplan is installed where systemd runs generators" \
     || bad "$t: $r/usr/lib/systemd/system-generators/netplan is missing or not executable - /etc/netplan would never be read at boot"
-  chk "$t: eth0 declared in netplan"        "$r/etc/netplan/01-openmux.yaml" '^[[:space:]]{4}eth0:$'
-  chk "$t: eth0 takes its address from DHCP" "$r/etc/netplan/01-openmux.yaml" '^[[:space:]]{6}dhcp4:[[:space:]]*true$'
+  chk "$t: $WIRED declared in netplan"      "$r/etc/netplan/01-openmux.yaml" "^[[:space:]]{4}${WIRED}:\$"
+  chk "$t: $WIRED takes its address from DHCP" "$r/etc/netplan/01-openmux.yaml" '^[[:space:]]{6}dhcp4:[[:space:]]*true$'
   [ "$(stat -c '%a' "$r/etc/netplan/01-openmux.yaml" 2>/dev/null)" = 600 ] \
     && ok "$t: the netplan file is 0600 (netplan warns at boot on any looser mode)" \
     || bad "$t: /etc/netplan/01-openmux.yaml is not mode 600"
@@ -186,7 +200,7 @@ network_stack() { # network_stack <root> <label>
                 | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C sort -u)
   [ "$renderers" = "networkd" ] \
     && ok "$t: network level renderer is networkd" \
-    || bad "$t: network level renderer keys are [$(printf '%s' "$renderers" | tr '\n' ' ')], want networkd alone - empty means no file says who owns eth0, and the answer is then a default defined outside this image"
+    || bad "$t: network level renderer keys are [$(printf '%s' "$renderers" | tr '\n' ' ')], want networkd alone - empty means no file says who owns $WIRED, and the answer is then a default defined outside this image"
   # WireGuard is the reason a renderer switch costs nothing here: netplan renders a
   # `tunnels:` entry of mode wireguard into a .netdev for networkd or a wireguard
   # profile for NetworkManager, with no plugin on either side. What has to exist in
@@ -207,7 +221,7 @@ network_stack() { # network_stack <root> <label>
   # refuses the same files, so this is the same rule read off the finished image.
   stray=$(find "$r/etc/netplan" -maxdepth 1 -name '90-NM-*' -print 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
   [ -z "$stray" ] \
-    && ok "$t: no NM-generated netplan file in the image (eth0 is configured by the YAML alone)" \
+    && ok "$t: no NM-generated netplan file in the image ($WIRED is configured by the YAML alone)" \
     || bad "$t: image ships an NM-generated netplan file: $stray"
   # Recommends are off build-wide (APT::Install-Recommends=false), which is what
   # keeps a second supplicant, a second DHCP client and the captive-portal helper
@@ -389,6 +403,7 @@ chk   "extend-filesystem script installed" "$R/usr/local/sbin/openmux-extend-fil
 # packages (local debs from dist/pkgs via openmux-packages layer)
 [ -f "$R/var/lib/dpkg/info/openmux-hardware.list" ] && ok "deb openmux-hardware installed" || bad "openmux-hardware missing"
 [ -f "$R/var/lib/dpkg/info/openmux-factory-tools.list" ] && ok "deb openmux-factory-tools installed" || bad "openmux-factory-tools missing"
+[ -f "$R/var/lib/dpkg/info/openmux-net-tools.list" ] && ok "deb openmux-net-tools installed" || bad "openmux-net-tools missing"
 # The same layer's distro operator tools. Read from dpkg's own file list rather
 # than from `/usr/bin/vi`: that path is a symlink whose target is an absolute
 # in-root path (/etc/alternatives/vi), so a -x test on it answers about the host.
@@ -400,6 +415,23 @@ done
 [ -x "$R/usr/bin/vim.basic" ] && ok "vim.basic present" || bad "/usr/bin/vim.basic missing (vim's Depends, the binary vim installs)"
 [ -L "$R/usr/bin/vi" ] && ok "/usr/bin/vi wired through update-alternatives" \
   || bad "/usr/bin/vi is not the alternatives symlink - vi would not be on PATH"
+# set-ip is how an operator points the wired port at a fixed address, and the mode
+# is pinned rather than only tested for -x: dpkg ships whatever mode the package
+# tree holds, and a tool that lost its exec bit says so only when someone needs it
+# at a console.
+[ -x "$R/usr/local/sbin/set-ip" ] && ok "set-ip installed and executable" \
+  || bad "/usr/local/sbin/set-ip missing or not executable (openmux-net-tools)"
+[ "$(stat -c '%a' "$R/usr/local/sbin/set-ip" 2>/dev/null)" = 755 ] \
+  && ok "set-ip mode 755" \
+  || bad "set-ip is mode $(stat -c '%a' "$R/usr/local/sbin/set-ip" 2>/dev/null || echo absent), not 755"
+# A shipped image configures $WIRED in 01-openmux.yaml and in nothing else.
+# 90-openmux-$WIRED.yaml is what set-ip writes on a box that was told otherwise, so
+# one in a fresh build has carried a single device's address into every device -
+# and the build-time generator gate would have merged it into its own verdict, so
+# this absence is what keeps that gate's answer true of the image as shipped.
+[ ! -e "$R/etc/netplan/90-openmux-${WIRED}.yaml" ] \
+  && ok "no operator-written address file in the image" \
+  || bad "/etc/netplan/90-openmux-${WIRED}.yaml is in the image: $WIRED's address would be one box's, not this build's"
 # The flashers and the shell wrappers exec five programs: ftdi_eeprom, sudo,
 # python3, bash and coreutils. bash/coreutils are Essential: yes and present by
 # policy; the other three are Priority: optional, so only the deb's Depends can
