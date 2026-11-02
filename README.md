@@ -29,6 +29,10 @@ Useful flags (see `./build.sh -h`):
 
 - `--repo-uri <uri>` / `--repo-gpg <key>` — customer APT repository
   (substituted into the image; the GPG key is staged into the repo layer).
+- `--openmux-env <file>` — ship this file as `/boot/firmware/openmux.env` on the
+  install medium, so its factory menu flashes a site's own vendor/product
+  strings (template: `openmux.env.example`). Validated before anything is built;
+  see "Shipping a custom `openmux.env`".
 - `--target-image <path>` + `--skip-target` — embed a pre-built target
   image in the medium without rebuilding it.
 - `--skip-install-medium` — build only the target.
@@ -69,9 +73,12 @@ paths are relative to the spec's own directory.
 build.sh                    single outside-Docker entry point
 Dockerfile                  build container, rpi-image-gen pinned (ARG RPI_IMAGE_GEN_REF)
 buildspec.example.yaml      customer build spec template (git-ignored in production)
+openmux.env.example         site FTDI identity template (-> --openmux-env)
 build/
   entry.sh                  in-container build flow (debs → overrides → both images)
   parse-buildspec.py        build spec → IGconf_* overrides + generated hooks
+  check-openmux-env.py      gate for --openmux-env, run against the shipped parser
+                            and the shipped udev rules
   make-deb.sh               package/*/ -> dist/pkgs/*.deb (dpkg-deb --root-owner-group)
 config/
   openmux-base.yaml         shared: openmux-base-system (the base system, listed
@@ -275,6 +282,87 @@ chip seams, because the seams are where a wrong numbering shows up.
 1-2, 3-4, 5-6, 7-8. Every tool also takes `--devices-dir`/`--sys-tty-dir`, which
 is how the offline tests drive them against a fake sysfs tree with no hardware.
 
+## Shipping a custom `openmux.env`
+
+None of the strings a chip is programmed with are compiled in. `scan_ftdi.py`
+reads `/boot/firmware/openmux.env` at flash time, precedence
+**flag > process env > this file > the constant in the script**, so one small
+file changes what the menu — and the flashers run by hand — writes:
+
+```sh
+cp openmux.env.example acme.env        # then edit (start with OPENMUX_MANUFACTURER)
+./build.sh --buildspec my-customer.yaml --openmux-env acme.env
+```
+
+`--openmux-env` is the **install medium** only (build.sh refuses it together with
+`--skip-install-medium`). It is put on the FAT partition, which `overlayroot`
+passes through, so — unlike anything else on that stick — it is writable during a
+session *and* survives the reboot. That is the same property menu option 8 uses
+for `cmdline.txt`, and it is why a stick already in the field can be corrected
+without a rebuild.
+
+`openmux.env.example` is the tracked half: every key is commented out, with what
+it replaces and what to leave alone. The site files themselves are not —
+`.gitignore` excludes `*.env`, so a customer's identity file cannot be committed
+by accident — and an untouched copy of the template is refused by the gate rather
+than shipped as a no-op. Keep each site's file where its build spec lives (the
+spec directory is where `post_install` and `key_file` already point).
+
+| key | constant it replaces | reaches |
+|---|---|---|
+| `OPENMUX_MANUFACTURER` | `OpenMux` | manufacturer string of every chip flashed |
+| `OPENMUX_PRODUCT_INTERNAL` | `OpenMux Console HW8, Internal FTDI` | product string, console chips |
+| `OPENMUX_PRODUCT_EXTERNAL` | `OpenMux eXtention EX-12` | product string, EX-12 chips |
+| `OPENMUX_SERIAL_PREFIX_INTERNAL` | `OMC` | serial prefix of the console chips |
+| `OPENMUX_SERIAL_PREFIX_EXTERNAL` | `OMX` | serial prefix of the card chips |
+
+The reader is a `KEY=VALUE` loop with no shell in it, which sets the format:
+comments only on their own line (everything after the first `=` is the value, so
+`OPENMUX_MANUFACTURER="ACME"  # vendor` sets `ACME"  # vendor`); quotes are
+stripped from each **end** and quote nothing, so `"ACME"` means `ACME` while a
+trailing quote is silently eaten (`ACME"Mfg"` means `ACME"Mfg`) and one inside the
+value stays inside `manufacturer="..."` in the `ftdi_eeprom` conf; no `export`, no
+`$VAR`, no line continuation; a key given twice keeps the **last** line; and a key
+that is not one of the five above is skipped in silence while the constant keeps
+applying.
+
+Two of those fail invisibly on a programmed chip, so the file is checked before
+anything is built — `build/check-openmux-env.py`, by the shipped code rather than
+a second copy of the format: key names, defaults and the parsing come from
+`scan_ftdi.py` itself, and the prefixes from the udev rules the same build ships.
+It reports each value as the tools will resolve it:
+
+```
+$ python3 build/check-openmux-env.py acme.env
+key                             value the tools will use  source
+------------------------------  ------------------------  ----------------
+OPENMUX_MANUFACTURER            ACME A/S                  file
+OPENMUX_PRODUCT_INTERNAL        ACME Console HW8, FTDI    file
+OPENMUX_PRODUCT_EXTERNAL        ACME eXtention EX-12      file
+OPENMUX_SERIAL_PREFIX_INTERNAL  OMC                       built-in default
+OPENMUX_SERIAL_PREFIX_EXTERNAL  OMX                       built-in default
+OK: acme.env (3 key(s)) matches the shipped parser and the shipped udev rules
+```
+
+**The two prefix keys are not a rename.** `99-openmux-ftdi.rules` matches
+`OMC[0-9]*`/`OMX[0-9]*` literally, and an env file cannot change a rule: set
+`OPENMUX_SERIAL_PREFIX_INTERNAL=XYZ` and the flash succeeds, the chip returns as
+`XYZ0001-A`, no rule claims it, and the console has no `/dev/openmux` ports —
+which reads as a dead board. `check-openmux-env.py` compares any prefix in the
+file against the rules and refuses the mismatch, because a real rename is the
+rules + `openmux-detect-hardware.sh` + `scan_ftdi.py` move described above and
+this file can only ever be two thirds of it.
+
+`om-verify.sh` closes it from the image side, given `OPENMUX_ENV_REF=<file>`: the
+finished `boot.vfat` must carry the file, and the file must resolve to the
+requested values **through the copy of `scan_ftdi.py` inside the image**. Without
+the variable, a medium that carries an `openmux.env` at all is a FAIL and not a
+skip — a leftover from an earlier site is exactly what nothing else would notice.
+
+To ship it on the **target** image as well — only needed for chips flashed in the
+field, since a running target uses the udev rules and never reads this file — a
+build spec `post_install` hook can write `$1/boot/firmware/openmux.env`.
+
 ## Verification
 
 - **Unit (fast):** `python3 build/parse-buildspec.py <spec> <outdir>` —
@@ -282,6 +370,9 @@ is how the offline tests drive them against a fake sysfs tree with no hardware.
 - **Config/metadata (fast, needs a reference clone of the engine):**
   `rpi-image-gen metadata --lint <layer>.yaml` and `rpi-image-gen config
   --write-to` for each config.
+- **Identity file (fast):** `python3 build/check-openmux-env.py <file>` — what
+  `--openmux-env` runs before the medium is built; also useful with
+  `--env-file` on any of the flashers to try a file before shipping it.
 - **Full:** `./build.sh --buildspec <spec>` — both images are
   produced in `dist/`. Boot test on real CM5 hardware: serial console
   115200 8N1 on `ttyAMA0` (the medium autologins as root into the menu;

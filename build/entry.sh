@@ -23,6 +23,9 @@
 #   TARGET_IMAGE   path to a pre-built target .img or .img.xz to embed
 #                  instead of building one
 #   REPO_URI       optional OpenMux APT repo URI (target repo layer)
+#   OPENMUX_ENV    optional file to ship on the medium as
+#                  /boot/firmware/openmux.env (the identity strings its factory
+#                  menu flashes). Validated here, before the medium build.
 
 set -euo pipefail
 
@@ -32,6 +35,7 @@ TARGET_IMAGE="${TARGET_IMAGE:-}"
 SKIPPED_TARGET="${SKIP_TARGET:-0}"
 SKIPPED_MEDIUM="${SKIP_MEDIUM:-0}"
 REPO_URI="${REPO_URI:-}"
+OPENMUX_ENV="${OPENMUX_ENV:-}"
 
 cd "$SRC"
 
@@ -201,8 +205,22 @@ if [ "$SKIPPED_MEDIUM" = "1" ]; then
 else
     echo
     echo ">> [5/5] building INSTALL MEDIUM (config/openmux-install-medium.yaml)"
+    MED_OVERRIDES=("IGconf_om_target_image=$TARGET_XZ")
+    if [ -n "$OPENMUX_ENV" ]; then
+        [ -f "$OPENMUX_ENV" ] || \
+            die "OPENMUX_ENV=$OPENMUX_ENV is not readable in the container (build.sh bind-mounts it at /om/openmux.env)"
+        # Gated here rather than trusted, because the file reaches a chip's
+        # EEPROM verbatim and the reader on the device reports nothing: an
+        # unknown key keeps the built-in default, and '"X" # note' parses to
+        # X" # note. build/check-openmux-env.py asks the shipped parser and the
+        # shipped udev rules what they make of it.
+        echo ">> validating openmux.env: $OPENMUX_ENV"
+        python3 build/check-openmux-env.py "$OPENMUX_ENV" \
+            || die "openmux.env rejected - the medium would ship it verbatim"
+        MED_OVERRIDES+=("IGconf_om_openmux_env=$OPENMUX_ENV")
+    fi
     rpi-image-gen build -S "$SRC" -c "$SRC/config/openmux-install-medium.yaml" \
-        -- "IGconf_om_target_image=$TARGET_XZ"
+        -- "${MED_OVERRIDES[@]}"
     MED_IMG="$(find "$SRC/work" -name 'openmux-install-medium-cm5.img' -type f 2>/dev/null | head -n1 || true)"
     [ -n "$MED_IMG" ] && [ -f "$MED_IMG" ] || die "install medium image not found under $SRC/work"
     echo "      install medium: $MED_IMG"

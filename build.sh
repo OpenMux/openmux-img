@@ -20,6 +20,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILDSPEC=""
 REPO_URI=""
 REPO_GPG=""
+OPENMUX_ENV=""
 TARGET_IMAGE=""
 SKIP_TARGET=0
 SKIP_MEDIUM=0
@@ -43,6 +44,14 @@ Options:
                        `post_install`. The file is git-ignored; never commit it.
   --repo-uri <uri>     OpenMux APT repo URI substituted into the target repo.
   --repo-gpg <file>    ASCII-armoured GPG key for a signed repo (copied in).
+  --openmux-env <file> Ship this file as /boot/firmware/openmux.env on the
+                       INSTALL MEDIUM, so its factory menu programs chips with a
+                       site's own vendor/product strings instead of the defaults
+                       built into the tools. Start from openmux.env.example.
+                       Validated against the shipped parser and udev rules before
+                       anything is built; see README ("Shipping a custom
+                       openmux.env"). Medium only, so it cannot be combined with
+                       --skip-install-medium.
   --target-image <p>   Embed an existing target .img/.img.xz instead of building
                        one (with or without --skip-target).
   --skip-target        Skip the target image build (requires --target-image).
@@ -61,6 +70,7 @@ while [ $# -gt 0 ]; do
     --buildspec)            BUILDSPEC="$2"; shift 2 ;;
     --repo-uri)             REPO_URI="$2"; shift 2 ;;
     --repo-gpg)             REPO_GPG="$2"; shift 2 ;;
+    --openmux-env)          OPENMUX_ENV="$2"; shift 2 ;;
     --target-image)         TARGET_IMAGE="$2"; shift 2 ;;
     --skip-target)          SKIP_TARGET=1; shift ;;
     --skip-install-medium)  SKIP_MEDIUM=1; shift ;;
@@ -89,11 +99,19 @@ command -v "$DOCKERCMD" >/dev/null 2>&1 || die "docker (or \$DOCKER) is required
 if [ "$SKIP_TARGET" -eq 1 ]; then
   [ -n "$TARGET_IMAGE" ] || die "--skip-target requires --target-image <path>"
   [ -f "$TARGET_IMAGE" ] || die "--target-image not found: $TARGET_IMAGE"
-  # No buildspec needed when only the medium is produced.
+  # No buildspec needed when only the medium is produced - but if one was passed
+  # anyway, it is resolved below like any other.
 else
   [ -n "$BUILDSPEC" ] || die "a target build requires --buildspec <file> (see buildspec.example.yaml)"
   [ -f "$BUILDSPEC" ] || die "buildspec not found: $BUILDSPEC"
-  # Mount the spec file's DIRECTORY (read-only), not the bare file: key_file / 
+fi
+
+# Resolve the spec's location for ANY spec that was given, --skip-target included:
+# the docker run below mounts $BUILDSPEC_DIR whenever $BUILDSPEC is non-empty, so
+# assigning these only in the target branch made `--buildspec … --skip-target …`
+# die on `set -u` (unbound variable) after printing the container line.
+if [ -n "$BUILDSPEC" ]; then
+  # The spec file's DIRECTORY (read-only), not the bare file: key_file /
   # post_install are resolved relative to the spec's own directory, so their
   # companion files (keys/, scripts/ ...) must be available in-container too.
   BUILDSPEC_DIR="$(cd "$(dirname "$BUILDSPEC")" && pwd)"
@@ -102,6 +120,19 @@ else
 fi
 
 [ -z "$REPO_GPG" ] || { [ -f "$REPO_GPG" ] || die "--repo-gpg not found: $REPO_GPG"; }
+
+# The env file is one read-only bind mount, never a copy into the tree: a staged
+# copy would outlive the build and be embedded in the NEXT medium by whoever
+# forgets the flag (--repo-gpg above has that wart and is git-ignored because of
+# it). Absolute path because a bind mount source must be one.
+OPENMUX_ENV_ABS=""
+if [ -n "$OPENMUX_ENV" ]; then
+  [ -f "$OPENMUX_ENV" ] || die "--openmux-env not found: $OPENMUX_ENV"
+  if [ "$SKIP_MEDIUM" -eq 1 ]; then
+    die "--openmux-env has nothing to do with --skip-install-medium: the file ships on the medium only"
+  fi
+  OPENMUX_ENV_ABS="$(cd "$(dirname "$OPENMUX_ENV")" && pwd)/$(basename "$OPENMUX_ENV")"
+fi
 
 # ------------------------------- repo GPG key ------------------------------
 # Staged into the repo layer's sources dir (git-ignored). The openmux-repo
@@ -144,6 +175,15 @@ if [ -n "$TARGET_IMAGE" ]; then
   TIMAGE_ARG=(-v "$(dirname "$TARGET_IMAGE")":/om/target:ro \
               -e TARGET_IMAGE=/om/target/$(basename "$TARGET_IMAGE"))
 fi
+# OPENMUX_ENV travels the same way: mounted read-only, path passed as an env var.
+# entry.sh validates it (build/check-openmux-env.py) before the medium build and
+# the layer's preimage hook installs it into the chroot's /boot/firmware, which
+# genimage then carries onto the FAT partition.
+OPENMUX_ENV_ARG=()
+if [ -n "$OPENMUX_ENV_ABS" ]; then
+  OPENMUX_ENV_ARG=(-v "$OPENMUX_ENV_ABS":/om/openmux.env:ro
+                   -e OPENMUX_ENV=/om/openmux.env)
+fi
 
 "$DOCKERCMD" run --rm --privileged \
   -e SRC=/src \
@@ -155,6 +195,7 @@ fi
   -v "$OUT":/src/dist \
   ${BUILDSPEC:+-v "$BUILDSPEC_DIR":/om/spec:ro} \
   ${TIMAGE_ARG[@]+"${TIMAGE_ARG[@]}"} \
+  ${OPENMUX_ENV_ARG[@]+"${OPENMUX_ENV_ARG[@]}"} \
   -w /src \
   "$DOCKER_IMAGE" \
   bash -lc "cd /src && bash build/entry.sh"
@@ -171,3 +212,17 @@ echo "     The factory menu autologins as root; option 1 writes the target"
 echo "     image to eMMC."
 echo "  3. After install + reboot, the target's accounts (from your buildspec)"
 echo "     can log in on serial and/or SSH (password and/or key per your spec)."
+
+# The medium now carries a file verify/om-verify.sh cannot guess at: its identity
+# checks refuse (not skip) when the FAT has an openmux.env and no expectation was
+# stated, so say how to state it rather than let the next person meet a FAIL.
+if [ -n "${OPENMUX_ENV_ABS:-}" ]; then
+  echo
+  echo "  openmux.env:   on the medium's FAT partition as /boot/firmware/openmux.env"
+  echo "                 Verify it against the source file:"
+  echo "                   docker run --rm --privileged \\"
+  echo "                     -v $REPO_ROOT:/src:ro -v $OPENMUX_ENV_ABS:/om/openmux.env:ro \\"
+  echo "                     -e SPEC=/src -e OPENMUX_ENV_REF=/om/openmux.env -e EXPECT_SSH_KEY=0 \\"
+  echo "                     -e EXPECT_POST_INSTALL=0 -e EXPECT_ADD_PKGS= -e EXPECT_QA1=0 \\"
+  echo "                     $DOCKER_IMAGE bash -lc 'bash /src/verify/om-verify.sh'"
+fi

@@ -18,6 +18,13 @@
 #   EXPECT_POST_INSTALL=0  spec leaves post_install out (no /usr/local/openmux marker)
 #   EXPECT_ADD_PKGS=       spec leaves additional_packages out (the fixture used curl git)
 #   EXPECT_QA1=0           spec has no `qa1` in additional_accounts
+# The medium's identity file is expected or forbidden by the same rule, driven by
+# what the build was given:
+#   OPENMUX_ENV_REF=<file> the `./build.sh --openmux-env` file this medium was
+#                          built with; it must be on the FAT partition
+#   unset / empty          the medium must carry no such file - and if it does
+#                          carry one, that is a FAIL, not a skip: the expectation
+#                          is unknown exactly when a leftover is dangerous
 set -u
 
 DIST="${DIST:-/src/dist}"
@@ -612,6 +619,66 @@ chk_not   "medium cmdline has no by-slot ref" "$V/mboot/cmdline.txt" 'by-slot'
 chk       "medium fstab root is PARTUUID"    "$M/etc/fstab" '^PARTUUID=[0-9a-f]{8}-02[ ]+/'
 chk_not   "medium fstab has no by-slot ref"  "$M/etc/fstab" 'by-slot'
 chk   "medium config.txt: dtparam=uart0 lines"  "$V/mboot/config.txt"  'dtparam=uart0_console=on'
+
+# --- the optional site identity file ----------------------------------------
+# Checked in BOTH directions: with OPENMUX_ENV_REF the file must be on the FAT
+# partition and resolve to the requested strings, without it the medium must NOT
+# carry one. The absence direction is the one that matters - the partition is
+# pass-through and the file is read by path, so a stale openmux.env (left by an
+# earlier site, or hand-edited in the field) would keep programming chips long
+# after the build stopped asking for it, and nothing on the stick would say so.
+# The name is case-checked by the path itself: vfat stores an 8.3-compatible name
+# uppercase and mounts it lowercase, which is why cmdline.txt is readable by that
+# exact name above - the reader uses the lowercase literal, so this pins it.
+OM_FAT="$V/mboot/openmux.env"
+if [ -n "${OPENMUX_ENV_REF:-}" ]; then
+  if [ ! -f "$OPENMUX_ENV_REF" ]; then
+    bad "OPENMUX_ENV_REF is not readable: $OPENMUX_ENV_REF"
+  elif [ ! -f "$OM_FAT" ]; then
+    bad "medium FAT has no openmux.env, but the build asked for $OPENMUX_ENV_REF"
+  else
+    ok "medium FAT carries openmux.env"
+    # The shipped reader decides what gets flashed, so agreement is judged by the
+    # copy INSIDE the image rather than by a second parser on the build host.
+    resolve_env() { # resolve_env <file> -> sorted KEY=value as scan_ftdi reads it
+      python3 - "$M/opt/openmux-factory-tools" "$1" <<'PY'
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import scan_ftdi as F
+for k, v in sorted(F.load_env_file(sys.argv[2]).items()):
+    print(f"{k}={v}")
+PY
+    }
+    want_env=$(resolve_env "$OPENMUX_ENV_REF")
+    got_env=$(resolve_env "$OM_FAT")
+    # Both sides empty compares equal, and empty is what the reader produces when
+    # it cannot be imported at all - so the vacuous case is named rather than
+    # allowed to pass. (A key-less file cannot reach here: check-openmux-env.py
+    # refuses one long before the image is built.)
+    if [ -z "$want_env" ]; then
+      bad "shipped reader resolved no values at all (no $M/opt/openmux-factory-tools?)"
+    elif [ "$want_env" = "$got_env" ]; then
+      ok "medium openmux.env resolves to the requested values (shipped reader)"
+    else
+      bad "medium openmux.env resolves DIFFERENTLY than $OPENMUX_ENV_REF"
+      printf '        requested: %s\n        on medium: %s\n' \
+        "$(printf '%s' "$want_env" | tr '\n' ' ')" \
+        "$(printf '%s' "$got_env" | tr '\n' ' ')"
+    fi
+    cmp -s "$OM_FAT" "$OPENMUX_ENV_REF" \
+      && ok "medium openmux.env is byte-identical to the requested file" \
+      || bad "medium openmux.env is not byte-identical to the requested file"
+  fi
+else
+  if is_absent "$OM_FAT"; then
+    ok "medium carries no openmux.env (none requested: tools keep their defaults)"
+  else
+    # Not "expected none": the expectation is unknown here, which is exactly when a
+    # leftover file is dangerous, so this refuses rather than skipping.
+    bad "medium carries openmux.env ($(sed -n 's/^\([A-Z_]*\)=.*/\1/p' "$OM_FAT" | tr '\n' ' ')) but OPENMUX_ENV_REF was not set - pass the file this medium was built with, or delete the file from the stick"
+  fi
+fi
 
 network_stack "$M" medium
 

@@ -13,8 +13,11 @@
 # X-Env-Layer-Desc: is the escape hatch out of that mode. In 1.3.0 the initrd
 # X-Env-Layer-Desc: also gets grep/sed and util-linux's mount, without which
 # X-Env-Layer-Desc: overlayroot silently boots read-write; a preimage hook
-# X-Env-Layer-Desc: asserts every half of it against the built artifacts.
-# X-Env-Layer-Version: 1.3.0
+# X-Env-Layer-Desc: asserts every half of it against the built artifacts. In
+# X-Env-Layer-Desc: 1.4.0 an optional site openmux.env can be shipped on the
+# X-Env-Layer-Desc: FAT partition (openmux_env below), which is what the factory
+# X-Env-Layer-Desc: menu's flashers read their vendor/product strings from.
+# X-Env-Layer-Version: 1.4.0
 # X-Env-Layer-Requires:
 # X-Env-VarPrefix: om
 #
@@ -25,8 +28,34 @@
 # X-Env-Var-target_image-Required: y
 # X-Env-Var-target_image-Valid: file
 # X-Env-Var-target_image-Set: y
+#
+# X-Env-Var-openmux_env:
+# X-Env-Var-openmux_env-Desc: File to ship as /boot/firmware/openmux.env on the
+# X-Env-Layer-Desc: medium, for a site that wants its own manufacturer/product
+# X-Env-Layer-Desc: strings flashed onto console and EX-12 chips. Empty (the
+# X-Env-Layer-Desc: default) ships no file and the tools keep their built-in
+# X-Env-Layer-Desc: strings; the layer's late preimage hook turns a non-empty
+# X-Env-Layer-Desc: value into that file, and fails the build when the value
+# X-Env-Layer-Desc: names nothing. Set by build.sh --openmux-env only; content is
+# X-Env-Layer-Desc: gated by build/check-openmux-env.py before this layer runs.
+# X-Env-Var-openmux_env-Required: n
+# X-Env-Var-openmux_env-Set: n
 # METAEND
 ---
+# --- optional site identity: /boot/firmware/openmux.env ----------------------
+# The factory tools read their EEPROM strings from one path and one path only,
+# scan_ftdi.ENV_FILE_DEFAULT = /boot/firmware/openmux.env, with the precedence
+# flag > process env > this file > the constant in the script. Nothing else in
+# the build writes that path, so with no `openmux_env` (header) every chip is
+# programmed with the constants in the tools. A supplied file goes on the FAT
+# partition, which is also where an operator can correct it later: overlayroot
+# passes vfat through, so unlike everything else on this stick it is writable
+# during a session and survives the reboot - the property menu option 8 relies on
+# for cmdline.txt. The install itself is
+# openmux-install-medium.d/hooks/late/preimage25-openmux-env, and om-verify.sh
+# requires the file on the finished boot.vfat when the build asked for one and its
+# absence when it did not.
+#
 # --- read-only by default: the overlay root ---------------------------------
 # `openmux-install-medium.d/for/linux-base/cmdline.d/30-openmux-overlay` adds
 # `overlayroot=tmpfs` to the kernel command line: the initramfs then mounts

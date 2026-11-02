@@ -1,0 +1,63 @@
+#!/bin/sh
+# Ship a site's openmux.env as /boot/firmware/openmux.env on the install medium.
+#
+# The factory tools look at exactly one path for their EEPROM identity strings
+# (scan_ftdi.ENV_FILE_DEFAULT), with the precedence flag > process env > file >
+# the constant in the script. The whole file therefore has to do one thing: be
+# present at that path in the finished image. genimage builds boot.vfat from the
+# chroot's /boot/firmware, so writing it there is sufficient, and the name is
+# already 8.3 ("openmux.env"), so nothing mangles it on the way through mcopy.
+#
+# Why a late preimage hook rather than an inline mmdebstrap customize-hook:
+#   * ordering is then settled rather than argued. Late hooks for a phase run
+#     after every layer's step hooks and overlays, and the FAT image is packed
+#     afterwards, so no later firmware step can be wondered about. This is also
+#     how openmux-serial-console writes config.txt (preimage20-config.txt), whose
+#     header records that an inline customize-hook would not even see $LAYER_DIR.
+#   * a runner hook can fail the build with a readable message; a line inside a
+#     generated chroot script cannot.
+#
+# Empty IGconf_om_openmux_env is the ordinary build: no file is shipped and the
+# tools keep their built-in strings. A NON-empty value with no file behind it is
+# the failure worth dying on - the caller asked for an image with this identity,
+# and one that quietly omits it still boots, still shows the menu and still
+# programs chips, with the wrong strings.
+#
+# The content gate is elsewhere and earlier: build/entry.sh runs
+# build/check-openmux-env.py, which asks the shipped parser and the shipped udev
+# rules what they make of the file. By here the bytes are settled, so this hook
+# checks presence, not sense.
+#
+# $1 = chroot target path (IGconf_target_path).
+set -eu
+
+env_src="${IGconf_om_openmux_env:-}"
+[ -n "$env_src" ] || exit 0
+
+if [ ! -f "$env_src" ]; then
+    echo "openmux-env: IGconf_om_openmux_env=$env_src but no such file to install" >&2
+    exit 1
+fi
+
+install -d -m 0755 "$1/boot/firmware"
+install -m 0644 "$env_src" "$1/boot/firmware/openmux.env"
+
+# Re-test rather than trusting install's exit status: everything downstream reads
+# the file by this exact path, and a hook that reported success while the path was
+# empty is the failure mode this whole feature exists to make loud.
+if [ ! -s "$1/boot/firmware/openmux.env" ]; then
+    echo "openmux-env: $1/boot/firmware/openmux.env is missing or empty after install" >&2
+    exit 1
+fi
+
+# The build log is the only record of which identity strings went out on this
+# medium, so print the values rather than the path. Comment/blank lines are not
+# keys and are not counted. Word-splitting into the positional parameters is how
+# the count and the list get derived from one source; keys with a space in the
+# VALUE stay one word each because only the KEY name is printed here.
+set -f
+keys=$(sed -n 's/^[[:space:]]*\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$env_src")
+set +f
+# shellcheck disable=SC2086
+set -- $keys
+echo "openmux-env: /boot/firmware/openmux.env ($# key(s)): $*"
