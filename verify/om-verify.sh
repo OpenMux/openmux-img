@@ -418,7 +418,8 @@ done
 # set-ip is how an operator points the wired port at a fixed address, and the mode
 # is pinned rather than only tested for -x: dpkg ships whatever mode the package
 # tree holds, and a tool that lost its exec bit says so only when someone needs it
-# at a console.
+# at a console. A run by anyone else re-executes this same path through sudo, so
+# the mode is what makes that work too - sudo runs the file, it does not read it.
 [ -x "$R/usr/local/sbin/set-ip" ] && ok "set-ip installed and executable" \
   || bad "/usr/local/sbin/set-ip missing or not executable (openmux-net-tools)"
 [ "$(stat -c '%a' "$R/usr/local/sbin/set-ip" 2>/dev/null)" = 755 ] \
@@ -433,7 +434,7 @@ done
   && ok "no operator-written address file in the image" \
   || bad "/etc/netplan/90-openmux-${WIRED}.yaml is in the image: $WIRED's address would be one box's, not this build's"
 # The flashers and the shell wrappers exec five programs: ftdi_eeprom, sudo,
-# python3, bash and coreutils. bash/coreutils are Essential: yes and present by
+# python3, bash and coreutils (set-ip execs sudo too, off the same pin). bash/coreutils are Essential: yes and present by
 # policy; the other three are Priority: optional, so only the deb's Depends can
 # promise them, and a Depends that does not resolve fails the BUILD (apt non-zero
 # + the set -eu hook) rather than shipping a broken image. Pinned at the artifact

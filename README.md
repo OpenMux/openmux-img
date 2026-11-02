@@ -241,7 +241,13 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
 - `set-ip` (from `openmux-net-tools`, target only) is how that address is changed
   without editing YAML. It prints the merged netplan and the live address, route and
   DNS first, then asks dhcp or static, and for static the address with its prefix
-  length, the gateway and the DNS servers. It writes one file of its own,
+  length, the gateway and the DNS servers. Any user runs it as themselves: the
+  files it reads are 0600 and what it writes is a daemon's configuration, so a run
+  which is not root re-executes the same command through sudo - the decision stays
+  in sudoers, next to the account's other privileged commands, and the sudoers
+  entry it needs is one path with no argument wildcards (`SETIP_NO_SUDO=1` declines
+  the re-exec, which is what a root shell or a test wants). It writes one file of
+  its own,
   `/etc/netplan/90-openmux-end0.yaml`, and edits no other: being sorted later is
   what makes it win the merge, and removing that one file is the way back to what
   the image ships. Sequences cannot be taken back by a later file - netplan adds an

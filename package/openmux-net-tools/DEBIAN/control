@@ -1,11 +1,11 @@
 Package: openmux-net-tools
-Version: 1.0.0
+Version: 1.1.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
 Homepage: https://github.com/OpenMux
 Section: net
 Priority: optional
-Depends: netplan.io, iproute2, systemd
+Depends: netplan.io, iproute2, systemd, sudo
 Description: Operator tool for the wired address on end0
  set-ip shows what netplan and the running system currently say about end0, asks
  for dhcp or static, and for static asks for the address with its prefix length,
@@ -28,8 +28,15 @@ Description: Operator tool for the wired address on end0
  the tool's own process: it restores the previous file and re-applies it unless the
  operator confirms, and it still fires when the session that armed it is gone.
  .
+ Privileges: any user may run it, and the files it reads are 0600, so a run which
+ is not root re-executes the same command through sudo. The decision therefore
+ stays in sudoers, alongside the account's other privileged commands, and the
+ sudoers entry needed is one path with no argument wildcards. SETIP_NO_SUDO=1
+ declines the re-exec and runs as-is.
+ .
  netplan.io provides the parser the file is validated with and the renderer the
  answer is read from; iproute2 provides the live address, route and reachability
  report; systemd provides networkctl, which says who owns the port, and
  systemd-run, which arms the rollback. resolvectl is used to show the DNS servers
- when systemd-resolved is present, and its absence is not fatal.
+ when systemd-resolved is present, and its absence is not fatal. sudo is what a
+ non-root run re-executes itself through.

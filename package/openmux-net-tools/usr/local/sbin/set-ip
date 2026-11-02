@@ -33,6 +33,12 @@
 #   set-ip --timeout SECS   how long the automatic rollback waits (default 120)
 #   set-ip --rollback       restore the staged previous file and re-apply; this is
 #                           what the rollback timer runs, not a command to type
+#   set-ip -h, --help       usage; the one thing answered without privileges
+#
+# Any user may run it. Not being root, it re-executes this same command through
+# sudo, so the account's sudo policy is what gates it - the same gate every other
+# privileged command on this box passes through. SETIP_NO_SUDO=1 refuses that and
+# runs as-is, for a root shell or a test with its own way of holding privileges.
 set -uo pipefail
 
 # end0 is the name udev gives this board's wired port, and a netdef is matched on
@@ -55,6 +61,42 @@ ANSWER= WHY= MODE=dhcp ADDR= GW= NS=
 die() { printf 'set-ip: %s\n' "$1" >&2; exit 1; }
 warn() { printf 'set-ip: warning: %s\n' "$1" >&2; }
 own_file() { printf '%s/%s\n' "$NETPLAN_DIR" "$OWN_FILE_NAME"; }
+
+# Root, demanded before anything is read or written: the files in /etc/netplan are
+# 0600, so even the read-only mode cannot see the configuration without it, and
+# writing one means a daemon being reconfigured. The operator types the command as
+# themselves and sudo is what decides, which keeps the policy in sudoers next to
+# the account's other privileged commands instead of in a setuid bit or a second
+# mechanism invented here - and keeps the sudoers entry one command with no
+# argument wildcards to keep correct.
+#
+# exec rather than a child process: the interview reads the terminal, and a child
+# would leave the terminal behind with the parent.
+#
+# SUDO_USER is set by sudo for every command it runs, which is how a second
+# unprivileged attempt can be recognised as one. Without that test a sudo which
+# runs the command without becoming root would be execed again by the process it
+# just started, and again after that: exec leaves no parent to count the tries.
+require_root() {
+  [[ $EUID -eq 0 ]] && return 0
+  [[ -z ${SETIP_NO_SUDO:-} ]] ||
+    die "not root (uid $EUID) and SETIP_NO_SUDO is set, so this will not raise itself: run it as root"
+  [[ -z ${SUDO_USER:-} ]] ||
+    die "ran through sudo as $SUDO_USER and are still not root (uid $EUID): check this account's policy with 'sudo -l'"
+  command -v sudo >/dev/null 2>&1 ||
+    die "not root (uid $EUID) and sudo is not installed: run it as root"
+  # This file as invoked, absolute: $SELF is what the rollback timer is armed with
+  # and is overridable, and sudo resolves a bare name through PATH instead of
+  # relative to the current directory. Canonicalised afterwards because sudo
+  # matches a command against sudoers by path, and `/dir/./set-ip` is not the
+  # string an admin wrote in sudoers - whether the run is allowed should not
+  # depend on which directory it was typed from.
+  local self=${BASH_SOURCE[0]} canon
+  [[ $self == /* ]] || self=$PWD/$self
+  canon=$(readlink -f -- "$self" 2>/dev/null) && [[ -n $canon ]] && self=$canon
+  printf 'set-ip: needs root, re-running the same command through sudo\n' >&2
+  exec sudo -- "$self" "$@"
+}
 
 # --- validation -------------------------------------------------------------
 # a.b.c.d -> its 32-bit value, non-zero exit on anything this tool will not
@@ -448,7 +490,6 @@ do_print() {
 
 do_rollback() {
   command -v netplan >/dev/null || die 'netplan is not installed'
-  [[ $EUID -eq 0 ]] || die 'the rollback writes /etc/netplan: it must run as root'
   rollback
 }
 
@@ -456,6 +497,9 @@ usage() { sed -n '/^# Usage:/,/^set -uo/p' "$SELF_SRC" | sed '/^set -uo/d; s/^# 
 
 main() {
   local SELF_SRC=$0 mode=interact others cand apply kept
+  # Kept for require_root: the loop below consumes the arguments, and the command
+  # re-executed under sudo has to be the one that was typed.
+  local -a typed=("$@")
 
   while (($#)); do
     case $1 in
@@ -470,6 +514,13 @@ main() {
     esac
   done
 
+  # Every mode from here reads 0600 files, writes one, or talks to the daemon.
+  # Placed after the loop on purpose: --help, the --timeout floor and an unknown
+  # argument are answered or refused without privileges, so a typo costs no
+  # password. require_root returns only as root, which is why nothing below asks
+  # again.
+  require_root "${typed[@]}"
+
   case $mode in
     print)    do_print; return 0 ;;
     rollback) do_rollback; return 0 ;;
@@ -478,7 +529,6 @@ main() {
   command -v netplan >/dev/null || die 'netplan is not installed'
   command -v ip >/dev/null || die 'ip (iproute2) is not installed'
   command -v systemd-run >/dev/null || die 'systemd-run is needed to arm the automatic rollback'
-  [[ $EUID -eq 0 ]] || die 'this writes /etc/netplan and applies it: run it as root'
   [[ -t 0 ]] || die 'this asks questions and needs a terminal; --print changes nothing and needs none'
 
   # First thing, before anything is asked or written: what this port does now.
