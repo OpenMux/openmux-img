@@ -1,18 +1,34 @@
 #!/bin/sh
-# Does the netplan configuration in this image actually reach NetworkManager?
+# Does the netplan configuration in this image do what the shipped design says,
+# when the generator runs the way SYSTEMD runs it?
 #
 # cleanup10-network-stack writes /etc/netplan/01-openmux.yaml with
-# `renderer: NetworkManager`, and that pin is the whole design: openmux-network
-# puts addressing in netplan and lets only NetworkManager apply it. The pin is
-# also the only fragile part, because netplan(5) says the renderer key
-# "Defaults to networkd if not defined" - a device that ends up on the default is
-# handed to the masked daemon while netplan tells udev `NM_UNMANAGED="1"` for it,
-# so neither daemon brings the link up and nothing is wrong at build time. That
-# failure needs the next boot to show, so it is not left to the next boot.
+# `renderer: networkd`, and that one key is the whole handover: it decides which
+# daemon configures eth0, and it also decides whether systemd-networkd is started
+# at all, because the generator enables the daemon itself - per boot - for exactly
+# the netdefs that name it. None of that is visible in the image: every byte of it
+# lands in /run, which is a tmpfs at boot. A config that quietly ends up on another
+# renderer therefore shows up as a device with no wired address and nothing wrong
+# at build time. So it is not left to the next boot.
 #
-# netplan-generator is run here, for real, and its output is read. Running it is
-# the only way to ask the question, because the answer depends on how several
-# files merge, and that is decided by netplan, not by this repo.
+# The generator is run here for real and its output is read. Running it is the only
+# way to ask the question: what one file says is easy to read, what SEVERAL files
+# merge into is decided by netplan, and what the merged result turns into - which
+# daemon, which interface, whether that daemon is started - is decided by the
+# generator's own code.
+#
+# Generator mode matters, not `netplan generate`: the same binary behaves according
+# to argv[0] and argc. Called as .../system-generators/netplan with the three
+# directories systemd passes (normal, early, late) it writes the wants entries a
+# boot really gets; called any other way it refuses ("can not be called directly")
+# or reads a positional argument as an input file, and writes no wants entry at
+# all. Judging the CLI form would prove nothing about boot.
+#
+# What is checked is the generator's output AND its silence. A non-zero exit is the
+# easy case; netplan discards what it cannot parse and exits 0, so a file with a
+# syntax error, or a single netdef with an unknown key, contributes nothing at boot
+# while the build still reports success. Only the warning it prints says so, and this
+# hook treats any warning as a failure.
 #
 # cleanup phase, after cleanup10 in the same layer (hooks run in name order): it
 # judges what cleanup10 wrote. /bin/sh like every runner hook here, because the
@@ -27,72 +43,141 @@ fail() { printf 'openmux-network: %s\n' "$1" >&2; exit 1; }
 # one would report a missing file instead of the missing tool.
 CHROOT=$(command -v chroot) || fail "chroot is not on PATH in the build container"
 
-GEN=usr/libexec/netplan/generate
-[ -x "$ROOT/$GEN" ] ||
-   fail "$ROOT/$GEN is not executable - netplan.io ships the generator and is a hard dependency of the Raspberry Pi build of network-manager, so this is a package-set problem, not a netplan problem"
+# Reached through the system-generators name because that name IS the mode switch -
+# and because a file systemd would not find there could not run at boot either.
+GEN=/usr/lib/systemd/system-generators/netplan
+[ -x "$ROOT$GEN" ] ||
+   fail "$ROOT$GEN is not executable - netplan-generator ships it, and netplan.io is a hard dependency of the Raspberry Pi build of network-manager, so this is a package-set problem, not a netplan problem"
 [ -d "$ROOT/etc/netplan" ] ||
    fail "$ROOT/etc/netplan does not exist - cleanup10-network-stack writes the file this hook judges"
 
-# Run the generator against a scratch tree, never against the image's own root:
-# everything it produces goes into <root>/run, and /run is the booted system's
-# tmpfs - leaving generated files in the captured image would ship a /run that
-# describes a boot that has not happened. `-r` also selects which netplan
-# directory is read, so the copy of etc/netplan below is what is judged, and the
-# real /etc stays untouched either way.
-SCRATCH=/tmp/openmux-netplan-check
-# Both scratch files go away with this hook on every path, not only the success
-# path: /tmp is inside the image, so a tree left behind by a failing run is a tree
-# the same build's later phases would capture. The trap is installed after
-# SCRATCH is assigned, so it can never expand to an empty path.
+# Generator output goes to ABSOLUTE /run paths inside the root it runs in, so this
+# run does write into the image. That is the one part of the design that cannot be
+# judged from a copy of /etc: `-r` redirects the input, not the output, and it is
+# the output systemd acts on. The state is therefore recorded first and restored
+# afterwards, and the restore is CHECKED rather than attempted (see the end of this
+# hook): a generated file captured into the image would describe a boot that never
+# happened, sitting under /run with nothing in the image to explain it.
+#
+# GD is the generator directory handed to the binary - one directory, passed three
+# times, because netplan writes its wants entries under the first argument and
+# modern systemd passes three. The name belongs to this hook and is removed
+# wholesale, which also disposes of netplan.stamp: while that stamp exists the
+# generator refuses to run twice ("netplan generate already ran"), so a leftover
+# would silence every later run.
+GD=/run/systemd/generator/openmux-netplan-check
+RUN="$ROOT/run"
+BEFORE=$(mktemp)
+AFTER=$(mktemp)
 LOG=$(mktemp)
-trap 'rm -rf "$ROOT$SCRATCH"; rm -f "${LOG:-}"' EXIT HUP INT TERM
-rm -rf "$ROOT$SCRATCH"
-mkdir -p "$ROOT$SCRATCH/etc"
-cp -a "$ROOT/etc/netplan" "$ROOT$SCRATCH/etc/"
-# cp -a keeps the 0600 the shipped file is written with. Without it this run
-# would emit netplan's "Permissions ... are too open" warning and the verdict
-# would be about the copy rather than about the image.
 
-# The log lives outside the image on purpose: inside, it would be a file the
-# image captures; and a relative path would land in the build container's
-# working directory, which is not the root being judged.
-"$CHROOT" "$ROOT" "$GEN" -r "$SCRATCH" >"$LOG" 2>&1 && gen_rc=0 || gen_rc=$?
-if [ -s "$LOG" ]; then
-   sed 's/^/openmux-network: netplan generate: /' "$LOG" >&2
-fi
-[ "$gen_rc" = 0 ] ||
-   fail "netplan generate exited $gen_rc against this image's /etc/netplan - the config does not parse, so no daemon would configure anything at boot"
-
-out="$ROOT$SCRATCH/run"
-gen_network=$(find "$out/systemd/network" -name '*.network' 2>/dev/null | LC_ALL=C sort)
-if [ -n "$gen_network" ]; then
-   fail "netplan generated systemd-networkd config, so the renderer is not NetworkManager for: $(printf '%s' "$gen_network" | sed "s|$ROOT$SCRATCH||" | tr '\n' ' ') (this image masks networkd, so those interfaces would get no address at all)"
-fi
-
-rules="$out/udev/rules.d/90-netplan.rules"
-if grep -q 'NM_UNMANAGED="1"' "$rules" 2>/dev/null; then
-   fail "netplan told udev to make a device unmanaged: $(grep 'NM_UNMANAGED="1"' "$rules" | tr '\n' ' ') - NetworkManager would be forbidden from configuring it"
-fi
-
-profile="$out/NetworkManager/system-connections/netplan-eth0.nmconnection"
-[ -f "$profile" ] || {
-   got=$(find "$out/NetworkManager/system-connections" -name '*.nmconnection' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-   fail "netplan wrote no NetworkManager profile for eth0 (it wrote: ${got:-nothing}); the address of eth0 depends on it"
+# undo() puts the root back the way BEFORE recorded it. It is the trap's job as
+# well as the success path's, so a FAILED verdict cannot leave the generator's
+# output in a chroot a later phase might still look at.
+undo() {
+   [ -n "${ROOT:-}" ] || return 0
+   rm -rf "${ROOT}${GD}"
+   rm -f  "$RUN/systemd/network"/10-netplan-*.network \
+          "$RUN/systemd/network"/10-netplan-*.netdev \
+          "$RUN/udev/rules.d/90-netplan.rules" \
+          "$RUN/NetworkManager/system-connections"/netplan-*.nmconnection \
+          "$RUN/NetworkManager/conf.d/10-globally-managed-devices.conf" \
+          "$RUN/NetworkManager/conf.d/netplan.conf" \
+          "$RUN/systemd/system"/netplan-*.service \
+          "$RUN/systemd/system/systemd-networkd.service.wants"/netplan-* \
+          "$RUN/systemd/system/multi-user.target.wants"/netplan-* \
+          "$RUN/systemd/system/systemd-networkd-wait-online.service.d/10-netplan.conf" 2>/dev/null || true
+   # rmdir only removes an EMPTY directory, so a directory that existed before this
+   # run and still holds the image's own files survives it. Only the leaves netplan
+   # creates are listed: never $RUN, never $RUN/systemd.
+   for d in "$RUN/systemd/network" \
+            "$RUN/systemd/system/systemd-networkd.service.wants" \
+            "$RUN/systemd/system/systemd-networkd-wait-online.service.d" \
+            "$RUN/systemd/system/multi-user.target.wants" \
+            "$RUN/NetworkManager/system-connections" \
+            "$RUN/NetworkManager/conf.d" \
+            "$RUN/udev/rules.d"; do
+      rmdir "$d" 2>/dev/null || true
+   done
 }
-# The two properties the image promises about its wired port, as netplan stated
-# them to the renderer: the profile is about eth0 by name, and it requests its
-# address rather than assigning one.
-[ "$(grep -x 'interface-name=eth0' "$profile" | head -n1)" = "interface-name=eth0" ] ||
-   fail "the generated eth0 profile does not name the interface: $(tr '\n' ' ' < "$profile")"
-[ "$(grep -x 'method=auto' "$profile" | head -n1)" = "method=auto" ] ||
-   fail "the generated eth0 profile does not request its address over DHCP: $(tr '\n' ' ' < "$profile")"
+# Installed before anything is created and before the first failure point, and every
+# path in it is a literal or assigned above, so it can never expand to an empty path
+# and no exit path can leave generated files behind.
+trap 'undo; rm -f "${LOG:-}" "${BEFORE:-}" "${AFTER:-}"' EXIT HUP INT TERM
 
-printf 'openmux-network: netplan renders into NetworkManager: %s\n' \
-   "${profile#$ROOT$SCRATCH}" >&2
+( cd "$RUN" && find . \( -type f -o -type l \) 2>/dev/null | LC_ALL=C sort ) >"$BEFORE"
+rm -rf "$ROOT$GD"
+mkdir -p "$ROOT$GD"
 
-# /tmp is inside the image, so the scratch tree must not survive this hook.
-rm -rf "$ROOT$SCRATCH"
-[ ! -e "$ROOT$SCRATCH" ] ||
-   fail "$ROOT$SCRATCH could not be removed; it would be captured into the image"
+# The log lives outside the image: inside, it would be a captured file, and a
+# relative path would land in the build container's working directory, which is not
+# the root being judged.
+"$CHROOT" "$ROOT" "$GEN" "$GD" "$GD" "$GD" >"$LOG" 2>&1 && gen_rc=0 || gen_rc=$?
+[ "$gen_rc" = 0 ] ||
+   fail "the generator exited $gen_rc against this image's /etc/netplan - the config does not parse, so at boot no daemon would configure anything"
+
+# Exit status is the weak signal; a silent log is the strong one. netplan discards a
+# file it cannot parse ('Skipping YAML file due to parsing errors') and discards a
+# single netdef with an unknown key or a wrong type ('Skipping definition due to
+# parsing errors'), each time as a warning on stderr, and exits 0 with the rest of the
+# configuration written. A site file with one bad indent, or one key spelled wrong,
+# therefore leaves eth0 working and does nothing itself - at build time and at boot,
+# where the trace is a journal warning. Requiring silence is what makes those build
+# failures. It also covers 'Permissions for ... are too open', netplan's way of saying
+# a file that could hold a Wi-Fi passphrase or a WireGuard private key is world-readable.
+if [ -s "$LOG" ]; then
+   sed 's/^/openmux-network: netplan: /' "$LOG" >&2
+   fail "the netplan generator complained about this image's /etc/netplan (lines above). It exits 0 anyway, having dropped whatever it complained about, so the file it dropped would simply be absent at boot"
+fi
+
+r="$RUN"
+net="$r/systemd/network/10-netplan-eth0.network"
+
+# 1. The renderer produced its own artifact for eth0, and asked for an address.
+[ -f "$net" ] || {
+   got=$(find "$r/systemd/network" -name '*.network' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
+   fail "netplan wrote no systemd-networkd config for eth0 (it wrote: ${got:-nothing}) - renderer: networkd did not take, so eth0 belongs to another daemon or to none"
+}
+# Three properties the image promises about its wired port, in the form networkd
+# reads them: the file is about eth0 by name, it requests rather than assigns an
+# address, and it does not turn the DNS off. The last is the quiet one - with
+# UseDNS=false networkd still gets an address and still never tells resolved the
+# nameservers, so the device is "up" and resolves nothing.
+grep -qx 'Name=eth0' "$net" ||
+   fail "the generated eth0 config does not match the interface by name: $(tr '\n' ' ' < "$net")"
+grep -qx 'DHCP=ipv4' "$net" ||
+   fail "the generated eth0 config does not request its address over DHCP: $(tr '\n' ' ' < "$net")"
+if grep -Eq '^[[:space:]]*UseDNS=false' "$net"; then
+   fail "the generated eth0 config sets UseDNS=false: resolved would never learn the nameservers, and DNS would fail on a link that looks connected"
+fi
+
+# 2. The daemon gets started for it. This is the part that exists only in the
+# generator's output: netplan enables systemd-networkd per boot, from the renderer
+# key, and no state in the image says so. Symlink test, never -e: the target is
+# relative (../systemd-networkd.service) and is meant to resolve through systemd's
+# generator search path at boot, not against this build host.
+en="$ROOT$GD/multi-user.target.wants/systemd-networkd.service"
+[ -L "$en" ] ||
+   fail "netplan enabled neither systemd-networkd nor an alternative for eth0: no wants entry was generated, so nothing would start a daemon to apply $(basename "$net")"
+
+# 3. Only one daemon ends up owning the port. For a networkd netdef netplan puts
+# the interface on NetworkManager's DENY list through udev, so NetworkManager -
+# still installed, still enabled, still the owner of anything wireless - keeps off
+# eth0; and no NM profile for it exists.
+rules="$r/udev/rules.d/90-netplan.rules"
+grep -Eq 'ID_NET_NAME\}=="eth0".*NM_UNMANAGED\}="1"' "$rules" 2>/dev/null ||
+   fail "eth0 is not on NetworkManager's deny list in $(basename "$rules"): $(printf '%s' "$(grep 'eth0' "$rules" 2>/dev/null | tr '\n' ' ')") - two daemons with one DHCP client each on the same link is what the deny list exists to prevent"
+if [ -e "$r/NetworkManager/system-connections/netplan-eth0.nmconnection" ]; then
+   fail "netplan produced a NetworkManager profile for eth0 as well as networkd's config - eth0 would be configured twice"
+fi
+
+undo
+( cd "$RUN" && find . \( -type f -o -type l \) 2>/dev/null | LC_ALL=C sort ) >"$AFTER"
+if ! cmp -s "$BEFORE" "$AFTER"; then
+   fail "left behind in /run by this run and not removable: $(comm -13 "$BEFORE" "$AFTER" | tr '\n' ' ') - those files describe a boot that has not happened and would ship inside the image"
+fi
+
+printf 'openmux-network: netplan renders eth0 into systemd-networkd (%s), enables the daemon for it, keeps NetworkManager off it, and left the image as it found it\n' \
+   "${net#$ROOT/}" >&2
 
 exit 0

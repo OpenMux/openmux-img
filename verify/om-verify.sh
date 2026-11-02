@@ -66,15 +66,14 @@ is_wanted() { # is_wanted <root> <target> <unit>  - enabled = a .wants symlink.
 }
 
 # The network stack the openmux-network layer builds, asserted on the finished
-# image. File state is the only thing observable without booting, and the two
-# halves have to be checked together: a unit that is masked but still wanted by a
-# target is a failed dependency job on every boot, and a unit that is neither
-# enabled nor masked is a daemon nobody started. The three pieces of the design
-# are checked as a set: netplan states the configuration, the renderer key hands
-# it to NetworkManager, and the masks keep systemd-networkd out of the bargain.
+# image. File state is the only thing observable without booting, and the halves
+# have to be checked together: netplan states the configuration, the renderer key
+# names the daemon that applies it, and the daemon named for the shipped config
+# (systemd-networkd) has to be reachable - not masked, not shadowed, and not wanted
+# by anything either, since the generator asks for it per boot from the config.
 network_stack() { # network_stack <root> <label>
-  local r=$1 t=$2 u p left renderers
-  echo "  -- network stack: NetworkManager, networkd retired ($t)"
+  local r=$1 t=$2 u p state wanted renderers
+  echo "  -- network stack: netplan rendered by systemd-networkd ($t)"
   [ -x "$r/usr/sbin/NetworkManager" ] && ok "$t: NetworkManager installed" \
     || bad "$t: /usr/sbin/NetworkManager missing"
   is_wanted "$r" multi-user NetworkManager.service \
@@ -85,15 +84,39 @@ network_stack() { # network_stack <root> <label>
   chk "$t: NM Wi-Fi backend is iwd" "$r/etc/NetworkManager/conf.d/iwd.conf" '^wifi\.backend=iwd$'
   [ -f "$r/var/lib/dpkg/info/iwd.list" ] && ok "$t: iwd installed" \
     || bad "$t: iwd missing, so Wi-Fi has no supplicant (wpa_supplicant is not installed either)"
+  # The same three absences the build hook asserts, read off the image. Each is a
+  # different way for /etc to outrank the renderer key, and none of them is visible
+  # in the YAML that outranking it defeats: a symlink to /dev/null makes the daemon
+  # unstartable (netplan still writes eth0's .network, systemd still refuses to run
+  # it, the port comes up with no address); any other symlink in that directory
+  # replaces or aliases the unit; and a .wants entry - from a hand `systemctl
+  # enable` or from 90-systemd.preset, which ships `enable systemd-networkd.service`
+  # - starts it on every boot even for config that named another renderer.
   for u in systemd-networkd.service systemd-networkd.socket \
            systemd-networkd-wait-online.service systemd-network-generator.service \
            dbus-org.freedesktop.network1.service; do
-    if is_masked "$r/etc/systemd/system/$u"; then ok "$t: $u masked"
-    else bad "$t: $u not masked (is: $(readlink "$r/etc/systemd/system/$u" 2>/dev/null || echo 'not a symlink'))"; fi
+    p="$r/etc/systemd/system/$u"
+    state=$(readlink "$p" 2>/dev/null || true)
+    wanted=$(ls "$r"/etc/systemd/system/*.wants/"$u" 2>/dev/null | tr '\n' ' ')
+    if is_masked "$p"; then
+      bad "$t: $u is masked, so the renderer in /etc/netplan names a daemon systemd will not start"
+    elif [ -L "$p" ]; then
+      bad "$t: $u is a symlink in /etc/systemd/system (-> $state), which outranks the unit in /usr/lib"
+    elif [ -n "$wanted" ]; then
+      bad "$t: $u is wanted by $wanted with nothing in netplan asking for it"
+    else
+      ok "$t: $u reaches systemd with no opinion from /etc"
+    fi
   done
-  left=$(ls "$r"/etc/systemd/system/*.wants/systemd-networkd* 2>/dev/null)
-  [ -z "$left" ] && ok "$t: nothing wants systemd-networkd" \
-    || bad "$t: still wanted by: $(echo "$left" | tr '\n' ' ')"
+  # Absent from both trees means the package set changed under the layer: the
+  # renderer would name a daemon the image does not ship. The D-Bus alias unit is
+  # not in /usr/lib on Debian, so it is excluded from this half of the check.
+  for u in systemd-networkd.service systemd-networkd.socket \
+           systemd-networkd-wait-online.service systemd-network-generator.service; do
+    [ -e "$r/etc/systemd/system/$u" ] || [ -e "$r/usr/lib/systemd/system/$u" ] \
+      && ok "$t: $u exists for systemd to start" \
+      || bad "$t: $u is in neither /etc nor /usr/lib - systemd-networkd ships it, so the renderer has no daemon behind it"
+  done
   # NetworkManager's [Install] has Also=NetworkManager-wait-online.service, so
   # enabling NM links a 60 s boot-stall unit into network-online.target; the layer
   # drops that link (it is not masked: a masked unit someone still wants fails the
@@ -102,8 +125,11 @@ network_stack() { # network_stack <root> <label>
   is_absent "$r/etc/systemd/system/network-online.target.wants/NetworkManager-wait-online.service" \
     && ok "$t: NetworkManager-wait-online is not wanted (no 60 s boot ceiling)" \
     || bad "$t: NetworkManager-wait-online.service is wanted by network-online.target"
-  # networkd's generated interface config must be gone with it: left behind, the
-  # first unit unmasked re-runs a second DHCP client on the same link.
+  # The .network files rpi-device-base generates have to be gone as well.
+  # /etc/systemd/network is networkd's own config source, read directly rather than
+  # through netplan, so 01-eth0.network describes the same port as netplan's generated
+  # /run/systemd/network/10-netplan-eth0.network: two DHCP clients, two sets of
+  # routes, and `netplan apply` neither reads nor removes the /etc one.
   for u in 01-eth0.network 02-wlan0.network; do
     is_absent "$r/etc/systemd/network/$u" && ok "$t: /etc/systemd/network/$u removed" \
       || bad "$t: /etc/systemd/network/$u still present"
@@ -120,37 +146,69 @@ network_stack() { # network_stack <root> <label>
   [ "$(readlink "$r/etc/resolv.conf" 2>/dev/null)" = "../run/systemd/resolve/stub-resolv.conf" ] \
     && ok "$t: /etc/resolv.conf is the resolved stub" \
     || bad "$t: /etc/resolv.conf is not the resolved stub ($(readlink "$r/etc/resolv.conf" 2>/dev/null || echo 'not a symlink'))"
-  # Wiring is configured in netplan and rendered by NetworkManager, so this file
-  # is load-bearing: if it is absent, or is not rendered by NM, nothing configures
-  # eth0. netplan's own default renderer is the wrong one here - netplan(5): the
-  # renderer "Defaults to networkd if not defined" - and a device left on the
-  # default gets nothing at all, because netplan hands it to the masked daemon and
-  # writes NM_UNMANAGED="1" for it so NetworkManager is told to keep off it too.
-  # The layer's cleanup20-netplan-render runs the generator and proves the
-  # renderer at build time; what is pinned here is the shipped text:
-  #   * netplan.io present. It is a Depends of the Raspberry Pi build of
-  #     network-manager, not of ours, so a future upstream change could drop it
-  #     and leave these files as decoration;
-  #   * every renderer key in the directory says NetworkManager, comments
-  #     stripped: netplan merges files per key, so one naming networkd defeats a
-  #     correct pin in another file;
-  #   * mode 0600. netplan(5) asks for it and warns otherwise, and the warning
-  #     comes from a generator that runs on every boot, so it would sit in the
-  #     journal of every device forever.
+  # Wiring is configured in netplan, so this file is load-bearing in a way it is not
+  # for a daemon that reads its own config directory: everything it says reaches the
+  # daemon through the generator, at boot, into /run. If the generator is missing, or
+  # the file does not name a renderer for eth0, nothing configures the port - and
+  # nothing in /etc betrays it, because netplan's output is a tmpfs by the time anyone
+  # can look. The layer's cleanup20-netplan-render runs the generator at build time;
+  # what is pinned here is what survived into the image:
+  #   * netplan.io and netplan-generator present, and reachable under the generator
+  #     directory. netplan.io is a Depends of the Raspberry Pi build of
+  #     network-manager, not of ours, so a future upstream change could drop it and
+  #     leave /etc/netplan as decoration;
+  #   * the renderer at network level says networkd. Comments stripped, and the indent
+  #     is the point: netplan merges files per key and the lexically later file wins,
+  #     so a second two-space `renderer:` in this directory has moved the whole image
+  #     to another daemon. A renderer deeper in the tree belongs to one netdef, which
+  #     is how a wlan0 or a modem entry is added, and is deliberately not constrained
+  #     here;
+  #   * mode 0600. netplan(5) asks for it and warns otherwise, and the warning comes
+  #     from a generator that runs on every boot, so it would sit in the journal of
+  #     every device forever. It is also the mode a file holding a Wi-Fi passphrase or
+  #     a WireGuard private key needs.
   is_absent "$r/var/lib/dpkg/info/netplan.io.list" \
     && bad "$t: netplan.io is not installed, so /etc/netplan renders into nothing" \
-    || ok "$t: netplan.io installed (it is what turns the YAML into a profile)"
+    || ok "$t: netplan.io installed (it is what turns the YAML into daemon config)"
+  # The unit-directory name is the mode switch: the same binary run any other way
+  # refuses or reads a file argument, and writes no wants entry. systemd only ever
+  # runs it as a generator, so this path is the only one that matters at boot.
+  [ -x "$r/usr/lib/systemd/system-generators/netplan" ] \
+    && ok "$t: netplan is installed where systemd runs generators" \
+    || bad "$t: $r/usr/lib/systemd/system-generators/netplan is missing or not executable - /etc/netplan would never be read at boot"
   chk "$t: eth0 declared in netplan"        "$r/etc/netplan/01-openmux.yaml" '^[[:space:]]{4}eth0:$'
   chk "$t: eth0 takes its address from DHCP" "$r/etc/netplan/01-openmux.yaml" '^[[:space:]]{6}dhcp4:[[:space:]]*true$'
   [ "$(stat -c '%a' "$r/etc/netplan/01-openmux.yaml" 2>/dev/null)" = 600 ] \
     && ok "$t: the netplan file is 0600 (netplan warns at boot on any looser mode)" \
     || bad "$t: /etc/netplan/01-openmux.yaml is not mode 600"
   renderers=$(cat "$r"/etc/netplan/*.yaml "$r"/etc/netplan/*.yml 2>/dev/null \
-                | sed 's/#.*//' | grep -Eo '^[[:space:]]*renderer:.*' \
+                | sed 's/#.*//' | grep -E '^  renderer:' \
                 | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C sort -u)
-  [ "$renderers" = "NetworkManager" ] \
-    && ok "$t: every netplan renderer key is NetworkManager" \
-    || bad "$t: netplan renderer keys are [$(printf '%s' "$renderers" | tr '\n' ' ')], want NetworkManager and nothing else"
+  [ "$renderers" = "networkd" ] \
+    && ok "$t: network level renderer is networkd" \
+    || bad "$t: network level renderer keys are [$(printf '%s' "$renderers" | tr '\n' ' ')], want networkd alone - empty means no file says who owns eth0, and the answer is then a default defined outside this image"
+  # WireGuard is the reason a renderer switch costs nothing here: netplan renders a
+  # `tunnels:` entry of mode wireguard into a .netdev for networkd or a wireguard
+  # profile for NetworkManager, with no plugin on either side. What has to exist in
+  # the image is the key tool and the kernel module the .netdev opens.
+  [ -x "$r/usr/bin/wg" ] \
+    && ok "$t: wireguard-tools installed (wg genkey makes the keys a tunnels: entry holds)" \
+    || bad "$t: /usr/bin/wg is missing, so a netplan WireGuard tunnel cannot be created or inspected on the device"
+  wgko=$(find "$r/usr/lib/modules" -name 'wireguard.ko*' -print 2>/dev/null | LC_ALL=C sort | head -1)
+  [ -n "$wgko" ] \
+    && ok "$t: kernel WireGuard module present (${wgko#"$r"})" \
+    || bad "$t: no wireguard.ko under /usr/lib/modules - a tunnels: netdef would be configured by networkd into a device the kernel cannot create"
+  # Exactly the one file the build intends to ship. NetworkManager writes a netplan
+  # file of its own, 90-NM-<uuid>.yaml, for any connection it is asked to keep, and
+  # it states the renderer for its device inside that file - so a root that carries
+  # one does not prove the shipped YAML works, and a profile for a site's old wiring
+  # would otherwise travel into every image built from this tree. NetworkManager is
+  # never started during a build, hence: never expected. The layer's cleanup hook
+  # refuses the same files, so this is the same rule read off the finished image.
+  stray=$(find "$r/etc/netplan" -maxdepth 1 -name '90-NM-*' -print 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
+  [ -z "$stray" ] \
+    && ok "$t: no NM-generated netplan file in the image (eth0 is configured by the YAML alone)" \
+    || bad "$t: image ships an NM-generated netplan file: $stray"
   # Recommends are off build-wide (APT::Install-Recommends=false), which is what
   # keeps a second supplicant, a second DHCP client and the captive-portal helper
   # out of the image. Pinned because they are Recommends of network-manager: one

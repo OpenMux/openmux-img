@@ -96,18 +96,24 @@ layer/
                             no packages of its own - a suite layer names its
                             providers and RequiresProvider never picks one, so
                             naming them is the only way to choose
-  openmux-network/          NetworkManager + iwd as the only network manager:
-                            conf.d (keyfile store, DNS left with resolved),
-                            /etc/netplan/01-openmux.yaml as the wired config
-                            surface (renderer pinned to NetworkManager because
-                            netplan's default is networkd), systemd-networkd
-                            masked, its generated .network files removed, the
-                            udev null-.link pair re-owned (that keeps eth0/wlan0 -
-                            and netplan keys eth0 by that name). Two cleanup hooks:
-                            one writes the state, the other runs netplan-generator
-                            for real and fails the build unless its verdict is an
-                            NM profile. Cleanup runs after EVERY layer's customize
-                            hooks, so nothing here depends on plan order
+  openmux-network/          netplan as the network configuration surface, rendered
+                            by systemd-networkd: /etc/netplan/01-openmux.yaml
+                            (eth0 on DHCP, `renderer: networkd`), NetworkManager +
+                            iwd kept installed and enabled for any netdef that names
+                            `renderer: NetworkManager` (Wi-Fi, a modem), conf.d
+                            (keyfile store, DNS left with resolved), wireguard-tools
+                            for `tunnels:`. Nothing in /etc holds an opinion about
+                            networkd - not masked, not wanted - because the renderer
+                            key is what starts it, per boot. Its generated .network
+                            files are removed (they would be a second DHCP client on
+                            eth0), the udev null-.link pair re-owned (that keeps
+                            eth0/wlan0 - and netplan keys eth0 by that name). Two
+                            cleanup hooks: one writes the state, the other runs
+                            netplan-generator as systemd runs it and fails the build
+                            unless the verdict is eth0 on networkd with the daemon
+                            enabled for it and nothing left behind. Cleanup runs
+                            after EVERY layer's customize hooks, so nothing here
+                            depends on plan order
   openmux-serial-console/   CM5 serial console: cmdline.d fragment (serial
                             console FIRST, tty1 kept) + config.txt append
                             (uart0/dtparam routing for the 40-pin PL011); login
@@ -157,25 +163,66 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   root, genimage). It replaces the engine's `trixie-minbase` suite layer, which
   hard-requires `systemd-net-min` by name and therefore could not be given a
   different network manager.
-- Networking is NetworkManager with iwd as its Wi-Fi backend
-  (`layer/openmux-network`), and nothing else: systemd-networkd is masked, the
-  `.network` files generated for it are removed, and its `wait-online` unit -
-  plus NetworkManager's own, which `enable` pulls in through `Also=` - has no
-  route into the boot. `wpa_supplicant` and every DHCP-client package stay
-  absent because Recommends are off build-wide (NM's internal DHCP client is
-  the default, so wired DHCP needs no package).
-- Wired addressing is CONFIGURED IN NETPLAN but rendered by NetworkManager:
-  `/etc/netplan/01-openmux.yaml` declares `eth0: dhcp4: true` with
-  `renderer: NetworkManager` at network level, so the operator interface is one
-  YAML file plus `netplan apply`. netplan-generator is a systemd generator - it
-  runs every boot regardless of enabled units - and writes the resulting profile
-  under /run, which keyfile loads: nothing lands in
-  /etc/NetworkManager/system-connections. The renderer key is load-bearing:
-  netplan defaults it to networkd, and a device left on that default gets no
-  address at all (unmanaged for NM, masked daemon), so a build-time hook runs
-  the real generator and fails the build unless the output is an NM profile.
-  Wi-Fi is deliberately absent from netplan: `wifis:` needs a PSK, images ship
-  no credentials - runtime nmcli + iwd as before.
+- Networking is netplan rendered by systemd-networkd, with NetworkManager and
+  iwd in the image for the netdefs that name it (`layer/openmux-network`). The
+  split is one key: `renderer:` at network level applies to the shipped config, and
+  on an individual netdef hands that device to the other daemon. Nothing else in
+  the image decides who owns an interface - which is why nothing under
+  `/etc/systemd/system` masks or enables a networkd unit either (see the next
+  bullet) and why the `.network` files the engine generates for networkd are
+  deleted: `/etc/systemd/network` is that daemon's own config source, read without
+  netplan, so a leftover runs a second DHCP client on a port netplan configured.
+  `wpa_supplicant` and every DHCP-client package stay absent because Recommends
+  are off build-wide; neither daemon needs one (networkd has systemd's internal
+  client, NetworkManager its own, and iwd is the Wi-Fi Supplicant).
+- `systemd-networkd` is neither masked nor enabled, and that is a state with two
+  failure directions, both of which `om-verify.sh` checks. A mask (or any symlink
+  over the unit in `/etc/systemd/system`) is the silent one: netplan would still
+  write eth0's `.network` and still ask for the daemon, systemd would refuse to
+  start a masked unit, and the board boots with no wired address while its netplan
+  file reads perfectly. A `.wants` entry is the opposite one - `systemctl enable`,
+  or the `enable systemd-networkd.service` line in the systemd package's own
+  `90-systemd.preset`, starts it on every boot even for a config that named
+  NetworkManager. In between, the generator decides: for a netdef naming networkd
+  it links the service into `multi-user.target.wants` under `/run`, per boot, from
+  the YAML - so `systemctl enable` and `disable` are not the levers here and neither
+  one wins an argument with the config.
+- Wired addressing is CONFIGURED IN NETPLAN: `/etc/netplan/01-openmux.yaml`
+  declares `eth0: dhcp4: true` with `renderer: networkd` at network level, so the
+  operator interface is one YAML file plus `netplan apply`. The key is stated
+  rather than left to netplan's default (which is networkd) because it is also what
+  starts the daemon, and because a site file can hand one device to NetworkManager
+  by naming the renderer on that netdef alone. Nothing persists: the generator runs
+  every boot and writes `/run/systemd/network/10-netplan-eth0.network` plus a udev
+  rule putting eth0 on NetworkManager's deny list. A build-time hook runs the real
+  generator, in generator mode, against the config as the build left it, and fails
+  unless the verdict is eth0 configured by networkd with the daemon enabled for it.
+  Read off the generator's output, not off the YAML, because netplan drops a file it
+  cannot parse and still exits 0 - the silence is part of the verdict.
+  Wi-Fi is deliberately absent from the shipped file: `wifis:` needs a PSK, images
+  ship no credentials - runtime nmcli + iwd as before, on a netdef that names the
+  NM renderer.
+- A WireGuard tunnel needs nothing installed beyond `wireguard-tools`, which
+  `openmux-network` adds for `wg genkey`: netplan `tunnels:` with `mode: wireguard`
+  renders to a `.netdev` for networkd or to a wireguard profile for NetworkManager,
+  and `wireguard.ko` is in the Raspberry Pi kernel. The private key is the reason
+  `/etc/netplan` is mode 0600 - netplan warns at boot about a looser mode, from the
+  generator that runs on every boot.
+- Asked to KEEP a connection (`nmcli connection modify/add`, `nmtui`),
+  NetworkManager writes a netplan file of its own:
+  `/etc/netplan/90-NM-<uuid>.yaml`, generated from the profile and naming its own
+  `renderer` for that device. It is not configuration to hand-edit - it is
+  regenerated from the profile, and it is deleted by `nmcli connection delete
+  <name>` rather than by `rm`. An image must never contain one, which both
+  the layer's cleanup hook and `om-verify.sh` enforce, and not only for tidiness:
+  because that file carries a renderer for its own device, a port it covers stays on
+  NetworkManager after a build that says networkd, so the extra file hides the one
+  mistake the shipped file cannot afford - and a box with one
+  therefore proves nothing about a fresh build of the same source.
+  Applying netplan changes restarts the daemon that owns the interface, so run it
+  from the serial console, not through the SSH session it is about to drop (`netplan
+  apply` disconnects the interfaces it manages first, because restarting the daemon
+  alone does not reload a profile).
 - The device layer is the engine's built-in `rpi-cm5` (`device.layer:
   rpi-cm5`; `class: cm5`).
 - The target's primary account uses the engine's native `user1` variables
