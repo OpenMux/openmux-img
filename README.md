@@ -120,9 +120,10 @@ layer/
                             via the getty-generator's serial-getty@ttyAMA0
   openmux-repo/             customer APT repo (DEB822 + GPG); clean no-op without a
                             configured URI (the medium never uses it)
-  openmux-packages/         installs the local .debs (hardware, factory-tools) in the
-                            target (a config-level packages: section does not exist in
-                            the pinned engine; this is the documented mechanism)
+  openmux-packages/         installs the local .debs (hardware, factory-tools) and the
+                            distro operator tools (vim, less) in the target (a
+                            config-level packages: section does not exist in the
+                            pinned engine; this is the documented mechanism)
   openmux-app/              distro packages (curl, git) + custom-repo packages list
   openmux-install-medium/   factory tuning + embedding the target image + menu deb;
                             .d/overlay/ carries root autologin drop-ins,

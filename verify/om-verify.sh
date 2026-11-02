@@ -389,6 +389,17 @@ chk   "extend-filesystem script installed" "$R/usr/local/sbin/openmux-extend-fil
 # packages (local debs from dist/pkgs via openmux-packages layer)
 [ -f "$R/var/lib/dpkg/info/openmux-hardware.list" ] && ok "deb openmux-hardware installed" || bad "openmux-hardware missing"
 [ -f "$R/var/lib/dpkg/info/openmux-factory-tools.list" ] && ok "deb openmux-factory-tools installed" || bad "openmux-factory-tools missing"
+# The same layer's distro operator tools. Read from dpkg's own file list rather
+# than from `/usr/bin/vi`: that path is a symlink whose target is an absolute
+# in-root path (/etc/alternatives/vi), so a -x test on it answers about the host.
+# vim.basic is the real binary and -L proves the alternative is wired up.
+for p in vim less; do
+  [ -f "$R/var/lib/dpkg/info/$p.list" ] && ok "operator package $p installed" \
+    || bad "$p missing: an operator on the serial console has no $( [ "$p" = vim ] && echo editor || echo pager )"
+done
+[ -x "$R/usr/bin/vim.basic" ] && ok "vim.basic present" || bad "/usr/bin/vim.basic missing (vim's Depends, the binary vim installs)"
+[ -L "$R/usr/bin/vi" ] && ok "/usr/bin/vi wired through update-alternatives" \
+  || bad "/usr/bin/vi is not the alternatives symlink - vi would not be on PATH"
 # The flashers and the shell wrappers exec five programs: ftdi_eeprom, sudo,
 # python3, bash and coreutils. bash/coreutils are Essential: yes and present by
 # policy; the other three are Priority: optional, so only the deb's Depends can
