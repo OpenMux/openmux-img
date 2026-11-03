@@ -468,6 +468,38 @@ build spec `post_install` hook can write `$1/boot/firmware/openmux.env`.
   the image is then written to eMMC and the device reboots into the
   target, where the build spec's accounts are active).
 
+## Licence
+
+MIT, see `LICENSE`. The notice names a person, not `OpenMux`: a project with no
+registered entity has no legal person that can hold the copyright, so the grant
+has to come from an identifiable author. `OpenMux <support@openmux.io>` in the
+deb `Maintainer:`/`Upstream-Contact:` fields is a contact address, not a rights
+holder. When an entity exists and owns contributions, it is added as its own
+`Copyright:` line — the earlier grant stays in force and is not withdrawn.
+
+Boundaries the licence does not move:
+
+- It covers this tree: `build.sh`, `Dockerfile`, `build/`, `config/`, `layer/`,
+  `verify/`, `package/` and this README.
+- It does not cover the built images. `openmux-cm5.img` and
+  `openmux-install-medium-cm5.img` are an aggregation of Debian trixie /
+  Raspberry Pi OS packages and Broadcom firmware, each under its own licence;
+  the scripts here are not a derivative work of the rootfs they assemble.
+  `filesystem-<date>.sbom`, written next to each build, is the authoritative
+  licence list for an image.
+- Nothing upstream is vendored. rpi-image-gen (BSD-3-Clause, pinned commit in
+  `Dockerfile`) is cloned inside the build container, and `genimage`,
+  `bdebstrap`/`mmdebstrap`, `libconfuse` and `zstd` are compiled by its
+  `install_deps.sh` under `work/`, which is git-ignored. Build-time use of them
+  is not restricted by this licence, and redistributing the tree does not
+  require shipping them.
+
+Every package under `package/` carries a DEP-5 `DEBIAN/copyright` with the same
+terms. dpkg installs it to `/usr/share/doc/<package>/copyright`, so the terms
+travel with the `.deb` into the image and into the APT repository (it is a
+control member, so it is not listed by `dpkg-deb --contents` and is untouched by
+the content checks in `build/make-deb.sh`).
+
 ## Design notes / caveats
 
 - **Serial console.** `console=serial0,115200` on the CM5 is the PL011
