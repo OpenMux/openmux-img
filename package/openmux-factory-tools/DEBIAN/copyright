@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: openmux-factory-tools
 Upstream-Contact: OpenMux <support@openmux.io>
-Source: https://github.com/OpenMux
+Source: https://github.com/OpenMux/openmux-img
 
 Files: *
 Copyright: 2026 Runar Borge

@@ -2,7 +2,7 @@ Package: openmux-net-tools
 Version: 1.1.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
-Homepage: https://github.com/OpenMux
+Homepage: https://github.com/OpenMux/openmux-img
 Section: net
 Priority: optional
 Depends: netplan.io, iproute2, systemd, sudo

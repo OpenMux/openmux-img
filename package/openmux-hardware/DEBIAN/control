@@ -2,7 +2,7 @@ Package: openmux-hardware
 Version: 1.1.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
-Homepage: https://github.com/OpenMux
+Homepage: https://github.com/OpenMux/openmux-img
 Section: misc
 Priority: optional
 Description: OpenMux hardware identity (internal FTDI console)
