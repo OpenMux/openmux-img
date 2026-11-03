@@ -259,16 +259,19 @@ done
 # what notices is a connection created with ifname=<name>, or an operator typing a
 # device name that is not there.
 #
-# The wired port is not named by either file. Its name on this hardware is `end0`,
-# chosen by udev, and a build cannot confirm it: the name exists only once
-# systemd-udevd has matched the device on a board, so nothing under $ROOT -
-# including the device tree blobs - is authoritative for it. The device is:
-# `udevadm info /sys/class/net/end0` for the names udev derived (ID_NET_NAME*,
-# ID_NET_LINK_FILE) and /sys/class/net/end0/name_assign_type, where 3 means the
-# name is udev's rather than the kernel's. What this phase can check is what
-# cleanup20-netplan-render checks: the real generator run over the key as written,
-# so the merge, the enablement and the deny rule come from that key whatever it is
-# spelled as.
+# The wired port is not named by either file: it is `end0` with both masks in
+# place, and `networkctl status end0` reports `Link File: n/a`, which is what a
+# masked .link looks like from a device. The port is the RP1 GMAC - the device tree
+# node aliased ethernet0, `ethernet@100000`, compatible `cdns,macb`, driver `macb`
+# - and its name is udev's, not the kernel's: /sys/class/net/end0/name_assign_type
+# is 4 (renamed), where 1 would be the kernel's own enumeration name; the
+# MAC-derived form `enx<mac>` survives only as an Alternative Name, which is the
+# spelling udev did not settle on. A build cannot confirm any of that: the name
+# exists once systemd-udevd has matched the device on a board, so nothing under
+# $ROOT - device tree blobs included - is authoritative for it. What this phase can
+# check is what cleanup20-netplan-render checks: the real generator run over the
+# key as written, so the merge, the enablement and the deny rule come from that key
+# whatever it is spelled as.
 #
 # The key is worth that much care because it is a match condition and nothing else:
 # `[Match] Name=`, NetworkManager's deny rule and the `-i <name>` in
