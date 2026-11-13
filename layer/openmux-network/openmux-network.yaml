@@ -7,9 +7,10 @@
 # X-Env-Layer-Desc: works at network level and per netdef, so a Wi-Fi card or a
 # X-Env-Layer-Desc: cellular modem is added by naming `renderer: NetworkManager` on
 # X-Env-Layer-Desc: that one device: netplan then writes it a keyfile profile under
-# X-Env-Layer-Desc: /run and puts only it on NetworkManager's allow list, while end0
-# X-Env-Layer-Desc: stays on networkd's deny list. iwd is the Supplicant behind that
-# X-Env-Layer-Desc: half. The upstream layers do the installing - network-manager
+# X-Env-Layer-Desc: /run, which is all the allow half needs. The deny half is not
+# X-Env-Layer-Desc: netplan's to do on this image - see (7) - so end0 is kept off
+# X-Env-Layer-Desc: NetworkManager by this layer. iwd is the Supplicant behind the
+# X-Env-Layer-Desc: wireless half. The upstream layers do the installing - network-manager
 # X-Env-Layer-Desc: adds the package and enables NetworkManager, network-manager-iwd
 # X-Env-Layer-Desc: pulls iwd and writes conf.d/iwd.conf - and this layer owns what
 # X-Env-Layer-Desc: they cannot express:
@@ -49,7 +50,11 @@
 # X-Env-Layer-Desc: whichever renderer is in use: masked, udev derives no name from
 # X-Env-Layer-Desc: them, so an adapter keeps the name it arrived with. They are not
 # X-Env-Layer-Desc: what names the wired port - that name is udev's, on the board, and
-# X-Env-Layer-Desc: is asserted here only as the key of the shipped netdef;
+# X-Env-Layer-Desc: is asserted here only as the key of the shipped netdef. Masking
+# X-Env-Layer-Desc: the default .link has a second consequence, which is why (7)
+# X-Env-Layer-Desc: exists: with no .link file claiming an interface, udev's
+# X-Env-Layer-Desc: net_setup_link builtin exports no ID_NET_NAME for it, and that
+# X-Env-Layer-Desc: property is what netplan's NetworkManager rules match on;
 # X-Env-Layer-Desc: (5) NetworkManager-wait-online.service is dropped out of
 # X-Env-Layer-Desc: network-online.target.wants rather than masked: `systemctl
 # X-Env-Layer-Desc: enable
@@ -72,6 +77,18 @@
 # X-Env-Layer-Desc: resolved itself, from its own internal DHCP client - so no
 # X-Env-Layer-Desc: client
 # X-Env-Layer-Desc: package is needed, on either renderer.
+# X-Env-Layer-Desc: (7) conf.d/20-openmux-networkd.conf denies the interfaces netplan
+# X-Env-Layer-Desc: renders with networkd to NetworkManager itself, with
+# X-Env-Layer-Desc: [keyfile] unmanaged-devices. netplan's own deny rule is a udev
+# X-Env-Layer-Desc: rule matching ENV{ID_NET_NAME}, which this image never exports
+# X-Env-Layer-Desc: for the wired port - see (4) - so left to netplan the port stays
+# X-Env-Layer-Desc: managed, NetworkManager auto-creates a default wired profile for
+# X-Env-Layer-Desc: it, activates that, and the port ends up addressed by a failed
+# X-Env-Layer-Desc: DHCP attempt while /etc/netplan reads correctly. cleanup20 writes
+# X-Env-Layer-Desc: the list from the generator's own output, so it names exactly the
+# X-Env-Layer-Desc: interfaces netplan renders with networkd - per interface, never
+# X-Env-Layer-Desc: `*`, because a netdef naming that renderer produces a
+# X-Env-Layer-Desc: .nmconnection instead of a .network and has to stay manageable.
 # X-Env-Layer-Desc: wireguard-tools is the one package this layer adds. A WireGuard
 # X-Env-Layer-Desc: tunnel needs no plugin on either renderer: netplan `tunnels:`
 # X-Env-Layer-Desc: with
@@ -93,7 +110,7 @@
 # X-Env-Layer-Desc: modemmanager daemon - so those netdefs arrive as site
 # X-Env-Layer-Desc: configuration, and the per-netdef renderer is what makes that a
 # X-Env-Layer-Desc: supported route rather than a change of design.
-# X-Env-Layer-Version: 1.2.0
+# X-Env-Layer-Version: 1.3.0
 # X-Env-Layer-Requires: network-manager-iwd,systemd-resolved
 # X-Env-Layer-Provides: openmux-network
 #
@@ -107,7 +124,8 @@ mmdebstrap:
 
 # Two cleanup hooks (openmux-network.d/hooks/):
 # cleanup10-network-stack writes the state, cleanup20-netplan-render runs
-# netplan-generator and judges what it produced. Same phase, name order.
+# netplan-generator, judges what it produced and writes NetworkManager's deny list
+# from it. Same phase, name order.
 #
 # Phase, not Requires, is what makes this layer's edits final. runner feeds
 # every plan layer into a single bdebstrap run, whose phases are strictly
@@ -142,7 +160,12 @@ mmdebstrap:
 # file no one looks at. What keeps netplan from being a second network manager is
 # that it is a renderer selector, not a daemon: it writes files - a .network for
 # networkd, an .nmconnection for NetworkManager - and the daemon the renderer key
-# names does the addressing.
+# names does the addressing. Naming a renderer does not, on its own, stop the other
+# daemon from configuring the same interface: netplan's way of doing that is a udev
+# rule matching ENV{ID_NET_NAME}, which systemd-udevd exports only for an interface a
+# .link file claims and this image masks the default .link, so cleanup20-netplan-render
+# writes NetworkManager's own deny list instead (conf.d/20-openmux-networkd.conf),
+# naming exactly the interfaces the generator produced networkd configs for.
 #
 # Two checks, because the failure mode is a config that means something different
 # from what it says. cleanup20-netplan-render runs the generator in boot mode at

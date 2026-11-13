@@ -3,13 +3,17 @@
 # when the generator runs the way SYSTEMD runs it?
 #
 # cleanup10-network-stack writes /etc/netplan/01-openmux.yaml with
-# `renderer: networkd`, and that one key is the whole handover: it decides which
-# daemon configures the wired port, and it also decides whether systemd-networkd is started
-# at all, because the generator enables the daemon itself - per boot - for exactly
-# the netdefs that name it. None of that is visible in the image: every byte of it
-# lands in /run, which is a tmpfs at boot. A config that quietly ends up on another
-# renderer therefore shows up as a device with no wired address and nothing wrong
-# at build time. So it is not left to the next boot.
+# `renderer: networkd`, and that one key decides which daemon configures the wired
+# port - and whether systemd-networkd is started at all, because the generator enables
+# the daemon itself, per boot, for exactly the netdefs that name it. It does not decide
+# what the other daemon does with the same port: keeping NetworkManager off an interface
+# it would otherwise manage is a separate fact, with its own file, and the generator's
+# output is the only reading of the config that says which interfaces it applies to.
+# That file is therefore written here, from that output, and the rest of this hook is
+# the verdict on it. None of it is visible in the image: every byte of the generator's
+# work lands in /run, which is a tmpfs at boot. A config that quietly ends up on another
+# renderer, or on two daemons at once, therefore shows up as a device with no wired
+# address and nothing wrong at build time. So it is not left to the next boot.
 #
 # The generator is run here for real and its output is read. Running it is the only
 # way to ask the question: what one file says is easy to read, what SEVERAL files
@@ -174,23 +178,82 @@ en="$ROOT$GD/multi-user.target.wants/systemd-networkd.service"
 [ -L "$en" ] ||
    fail "netplan enabled neither systemd-networkd nor an alternative for $IFACE: no wants entry was generated, so nothing would start a daemon to apply $(basename "$net")"
 
-# 3. Only one daemon ends up owning the port. For a networkd netdef netplan puts
-# the interface on NetworkManager's DENY list through udev, so NetworkManager -
-# still installed, still enabled, still the owner of anything wireless - keeps off
-# $IFACE; and no NM profile for it exists. Both come from the netdef name, which is
-# why that name is derived above instead of repeated here: keyed to a name the port
-# does not have, netplan denies that name and nothing keeps the daemon off the port
-# that is really there.
+# 3. The netdef key reached the generator's udev rules. For a networkd netdef netplan
+# emits `ENV{ID_NET_NAME}=="<netdef>", ENV{NM_UNMANAGED}="1"`, and on this image that
+# rule matches nothing: systemd-udevd exports ID_NET_NAME from one place, the
+# net_setup_link builtin, and only for an interface some .link file claims, while this
+# image masks 99-default.link to /dev/null (cleanup10 keeps the mask; a board reports
+# it as `Link File: n/a` in `networkctl status`). Step 4 therefore denies the port to
+# NetworkManager in NetworkManager's own terms. This step still proves something on its
+# own, and it is about the KEY: the key selected something, so every name derived from
+# it - the .network asserted above, this rule, wait-online's `-i <name>` drop-in, the
+# deny list written next - is the port on the board and not one the YAML invented.
 rules="$r/udev/rules.d/90-netplan.rules"
 # Collected before the verdict, not inside it: a command substitution in the
 # message would need quotes nested three deep, and grep exits 1 on no match, which
 # set -e would take as the hook's own failure rather than as the description of one.
 deny=$(grep -F "$IFACE" "$rules" 2>/dev/null | tr '\n' ' ' || true)
 grep -Eq "ID_NET_NAME\}==\"$IFACE\".*NM_UNMANAGED\}=\"1\"" "$rules" 2>/dev/null ||
-   fail "$IFACE is not on NetworkManager's deny list in $(basename "$rules"): ${deny:-no rule mentions it} - two daemons with one DHCP client each on the same link is what the deny list exists to prevent"
+   fail "no deny rule for $IFACE in $(basename "$rules"): ${deny:-no rule mentions it} - the netdef key is what the generated names, this rule and wait-online's -i are all built from, so a key that selects nothing leaves $IFACE to whichever daemon has no rule about it"
 if [ -e "$r/NetworkManager/system-connections/netplan-$IFACE.nmconnection" ]; then
    fail "netplan produced a NetworkManager profile for $IFACE as well as networkd's config - $IFACE would be configured twice"
 fi
+
+# 4. NetworkManager is told to keep off those ports by NetworkManager, and the list is
+# built from the .network files above rather than from the YAML, which is the whole
+# correctness argument: it names exactly the interfaces netplan renders with networkd.
+# The udev rule just asserted cannot do this here, because the property it matches is
+# never exported, and an interface left managed is not a harmless omission: for a
+# managed ethernet device with no profile of its own NetworkManager creates its default
+# wired profile, activates it, and the port ends up with whatever that profile
+# produced - after a failed address attempt, no IPv4 at all - while /etc/netplan
+# continues to read correctly and netplan's own output says networkd owns the port.
+#
+# unmanaged-devices is read at startup, no udev in the path, and an interface it names
+# is strictly unmanaged: `nmcli device set <if> managed yes` does not overrule it.
+# Per interface and never `*`, because a netdef naming the NetworkManager renderer -
+# how a wlan0 or a modem entry is written - produces a .nmconnection instead of a
+# .network and must stay manageable. Deriving the list from the generator instead of
+# restating it is what keeps a stale entry out of an image: a site file that moves a
+# port to the other renderer changes the generator's output, and this list follows it
+# in the same build.
+specs=''
+for f in "$r"/systemd/network/10-netplan-*.network; do
+   [ -e "$f" ] || continue   # an unmatched glob stays the literal pattern in /bin/sh
+   id=${f##*/10-netplan-}; id=${id%.network}
+   specs="${specs:+$specs;}interface-name:$id"
+done
+# Step 1 requires one of these for $IFACE, so a build cannot get here; the guard is
+# for the next edit, because an empty unmanaged-devices means "manage everything" to
+# NetworkManager - the exact absence this file exists to prevent.
+[ -n "$specs" ] ||
+   fail "no systemd-networkd config was generated for any interface, so nothing could be denied to NetworkManager - an empty unmanaged-devices is not a deny list"
+
+# conf.d rather than the conffile, for the reason 10-openmux.conf gives: editing
+# /etc/NetworkManager/NetworkManager.conf turns every network-manager update into a
+# conffile prompt in a non-interactive image. NM merges conf.d in filename order and
+# only same-key files interact, and this file shares no key with 10-openmux.conf or
+# iwd.conf. [keyfile] because outside that group the key is read as nothing, which is
+# the same as not writing the file.
+nmdeny="$ROOT/etc/NetworkManager/conf.d/20-openmux-networkd.conf"
+install -d -m 0755 "${nmdeny%/*}"
+{
+   cat <<'EOF'
+# Written by the openmux-network image layer, from this config's netplan output: the
+# interfaces rendered with systemd-networkd, denied to NetworkManager.
+#
+# netplan's own rule for this matches ENV{ID_NET_NAME}, which systemd-udevd exports
+# only for an interface a .link file claims; this image masks the default .link, so it
+# claims none and the rule matches nothing on the uevent a boot produces. Do not add
+# an interface netplan renders with NetworkManager (a wlan0 or modem netdef, or the
+# wired port if a site moves it to that renderer): it would go to a daemon told never
+# to look at it, and moving a port is supposed to need one edit, in the YAML.
+
+[keyfile]
+EOF
+   printf 'unmanaged-devices=%s\n' "$specs"
+} >"$nmdeny"
+chmod 644 "$nmdeny"
 
 undo
 ( cd "$RUN" && find . \( -type f -o -type l \) 2>/dev/null | LC_ALL=C sort ) >"$AFTER"
@@ -198,7 +261,7 @@ if ! cmp -s "$BEFORE" "$AFTER"; then
    fail "left behind in /run by this run and not removable: $(comm -13 "$BEFORE" "$AFTER" | tr '\n' ' ') - those files describe a boot that has not happened and would ship inside the image"
 fi
 
-printf 'openmux-network: netplan renders %s into systemd-networkd (%s), enables the daemon for it, keeps NetworkManager off it, and left the image as it found it\n' \
+printf 'openmux-network: netplan renders %s into systemd-networkd (%s), enables the daemon for it, denies it to NetworkManager with the list read off that output, and leaves nothing generated behind in /run\n' \
    "$IFACE" \
    "${net#$ROOT/}" >&2
 

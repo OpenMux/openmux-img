@@ -108,16 +108,21 @@ layer/
                             files are removed (they would be a second DHCP client on
                             a port netplan already configured) and its null-.link
                             pair kept: masked, udev derives no name from them, so a
-                            USB adapter or gadget keeps the name it arrived with. The
-                            wired port's own name comes from udev matching the device
-                            on the board, which is why the cleanup hooks pin the name
-                            in the YAML rather than a name read off hardware. Two
-                            cleanup hooks: one writes the state, the other runs
-                            netplan-generator as systemd runs it and fails the build
-                            unless the verdict is end0 on networkd with the daemon
-                            enabled for it and nothing left behind. Cleanup runs
-                            after EVERY layer's customize hooks, so nothing here
-                            depends on plan order
+                            USB adapter or gadget keeps the name it arrived with. That
+                            mask also costs `ID_NET_NAME`, the only property netplan's
+                            own NetworkManager rules can match on, so the layer denies
+                            the port to NetworkManager itself, in
+                            `conf.d/20-openmux-networkd.conf`. The wired port's name
+                            comes from udev matching the device on the board, which is
+                            why the cleanup hooks pin that name in the YAML rather than
+                            one read off hardware. Two cleanup hooks: one writes the
+                            state, the other runs netplan-generator as systemd runs it,
+                            fails the build unless the verdict is end0 on networkd with
+                            the daemon enabled for it, and writes that deny list from
+                            the run's output - one `interface-name:` per interface
+                            netplan renders with networkd, so no entry outlives the
+                            netdef that needed it. Cleanup runs after EVERY layer's
+                            customize hooks, so nothing here depends on plan order
   openmux-serial-console/   CM5 serial console: cmdline.d fragment (serial
                             console FIRST, tty1 kept) + config.txt append
                             (uart0/dtparam routing for the 40-pin PL011); login
@@ -203,17 +208,30 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   starts the daemon, and because a site file can hand one device to NetworkManager
   by naming the renderer on that netdef alone. Nothing persists: the generator runs
   every boot and writes `/run/systemd/network/10-netplan-end0.network` plus a udev
-  rule putting end0 on NetworkManager's deny list. A build-time hook runs the real
-  generator, in generator mode, against the config as the build left it, and fails
-  unless the verdict is end0 configured by networkd with the daemon enabled for it.
-  Read off the generator's output, not off the YAML, because netplan drops a file it
-  cannot parse and still exits 0 - the silence is part of the verdict. The name a
-  netdef is keyed by is a match condition, not a label: the generated `[Match]`, the
-  deny rule and wait-online's `-i` argument are all derived from it, so a key that
-  does not name the port the board booted with leaves that port with no netdef and
-  nothing keeping NetworkManager off it. Which name that is can only be seen on a
-  device (`ip -br link`, `udevadm info /sys/class/net/end0`); no stage of a build
-  observes it.
+  rule per netdef. That rule cannot be what keeps NetworkManager off the port here:
+  it matches `ENV{ID_NET_NAME}`, which udev exports only for an interface a `.link`
+  file claims and this image masks the default one, so the layer writes
+  `/etc/NetworkManager/conf.d/20-openmux-networkd.conf` instead - NetworkManager's own
+  `[keyfile] unmanaged-devices` list, read at startup with no udev in the path, one
+  `interface-name:` per interface netplan renders with networkd, taken from the
+  generator's output rather than restated from the YAML. A port left managed is not a
+  harmless omission: NetworkManager auto-creates its default wired profile for a
+  managed ethernet device that has none, activates it, and after a failed address
+  attempt the port holds no IPv4 address while the YAML beside it reads perfectly. A
+  build-time hook runs the real generator, in generator mode, against the config as
+  the build left it, fails unless the verdict is end0 configured by networkd with the
+  daemon enabled for it, and writes that list from what the run produced. Read off the
+  generator's output, not off the YAML, because netplan drops a file it cannot parse
+  and still exits 0 - the silence is part of the verdict. The name a netdef is keyed
+  by is a match condition, not a label: the generated `[Match]`, the deny rule and
+  wait-online's `-i` argument are all built from it, and so is the `interface-name:`
+  in the deny list - a key naming a port the board did not boot with leaves that port
+  with no netdef and no entry keeping NetworkManager off it. Which name it is can only
+  be seen on a device (`ip -br link`, `udevadm info /sys/class/net/end0`); no stage of
+  a build observes it. An interface whose netdef names the NetworkManager renderer is
+  not in `unmanaged-devices` and cannot be - the list is exactly the set of interfaces
+  the generator produced networkd configs for - so moving a port to that renderer is
+  one edit, in the YAML.
   Wi-Fi is deliberately absent from the shipped file: `wifis:` needs a PSK, images
   ship no credentials - runtime nmcli + iwd as before, on a netdef that names the
   NM renderer.

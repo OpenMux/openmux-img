@@ -79,8 +79,10 @@ EOF
 # /run/systemd/network/10-netplan-end0.network (`[Network] DHCP=ipv4`, read by
 # networkd directly and served by systemd's own internal DHCP client - no client
 # package, and DNS goes to resolved, which this layer requires), plus a udev rule
-# placing end0 on NetworkManager's DENY list so the two daemons cannot both answer
-# for the port. It also writes
+# placing end0 on NetworkManager's DENY list - a rule matching ENV{ID_NET_NAME}, which
+# udevd exports only for an interface a .link file claims, so it matches nothing while
+# the mask below stands, and cleanup20-netplan-render writes the deny list
+# NetworkManager does read from the output of that run. It also writes
 # /run/systemd/generator/multi-user.target.wants/systemd-networkd.service:
 # netplan enables the daemon itself, per boot, for exactly the netdefs that need
 # it - which is why nothing under /etc/ is written for networkd below. A config

@@ -91,6 +91,18 @@ network_stack() { # network_stack <root> <label>
   chk "$t: NM settings store is keyfile" "$r/etc/NetworkManager/conf.d/10-openmux.conf" '^plugins=keyfile$'
   chk "$t: NM delegates DNS to resolved" "$r/etc/NetworkManager/conf.d/10-openmux.conf" '^dns=systemd-resolved$'
   chk "$t: NM Wi-Fi backend is iwd" "$r/etc/NetworkManager/conf.d/iwd.conf" '^wifi\.backend=iwd$'
+  # NetworkManager has to be kept off $WIRED by NetworkManager's own key, not by
+  # netplan's deny rule: that rule is a udev rule matching ENV{ID_NET_NAME}, which
+  # systemd-udevd exports only for an interface a .link file claims, and the null
+  # .link pair a few checks below means nothing claims anything. Without this file
+  # the wired port is managed: NM auto-creates a default wired profile for a managed
+  # ethernet device that has none, activates it, and its address is what the port
+  # ends up with - after a failed DHCP attempt, no IPv4 address - while the netplan
+  # YAML beside it continues to read correctly. The group is checked separately
+  # because a key in the wrong group is not an error to NM, it is a deny list nobody
+  # reads: the same absence, reported as a pass.
+  chk "$t: deny list sits in the group NM reads" "$r/etc/NetworkManager/conf.d/20-openmux-networkd.conf" '^\[keyfile\]$'
+  chk "$t: NM is denied $WIRED" "$r/etc/NetworkManager/conf.d/20-openmux-networkd.conf" "^unmanaged-devices=[^ ]*interface-name:${WIRED}(;|\$)"
   [ -f "$r/var/lib/dpkg/info/iwd.list" ] && ok "$t: iwd installed" \
     || bad "$t: iwd missing, so Wi-Fi has no supplicant (wpa_supplicant is not installed either)"
   # The same three absences the build hook asserts, read off the image. Each is a
@@ -149,7 +161,10 @@ network_stack() { # network_stack <root> <label>
   # NamePolicy from them, so a USB adapter or gadget keeps the name it arrived with -
   # the state a provisioning adapter has to keep for whoever plugs it in. The wired
   # port's name is not one of the things they produce, and $WIRED is pinned from the
-  # YAML rather than from here.
+  # YAML rather than from here. What they do cost is stated with the deny list above:
+  # with no .link file claiming an interface, udev's net_setup_link builtin exports no
+  # ID_NET_NAME for it, and ID_NET_NAME is the property netplan's NetworkManager rules
+  # match on.
   for u in 99-default.link 73-usb-net-by-mac.link; do
     is_masked "$r/etc/systemd/network/$u" && ok "$t: $u still disabled (udev names nothing from it)" \
       || bad "$t: /etc/systemd/network/$u is not a null link - the names it does cover will change"
