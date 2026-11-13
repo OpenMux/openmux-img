@@ -321,13 +321,19 @@ other_files_with_static_ip() {
 
 # --- the file ---------------------------------------------------------------
 # $1 static address, $2 gateway (may be empty), $3 nameservers (space separated).
+# The comment block is a QUOTED heredoc, which is not a style choice: an unquoted one
+# expands its own text, so a backquote or $( ) written into prose is executed while the
+# file is being built - and this text names commands, one of them `netplan apply`, which
+# would then run at that moment, before the operator has agreed to anything, with its
+# output pasted into the file. The values are printed by the lines around it instead.
 yaml_for_static() {
   local a=$1 g=$2 ns=$3 n
-  cat <<EOF
-# ${OWN_FILE_NAME} - ${IFACE} addressing, written by set-ip on $(date -u '+%Y-%m-%d %H:%M:%S UTC').
+  printf '# %s - %s addressing, written by set-ip on %s.\n' \
+    "$OWN_FILE_NAME" "$IFACE" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  cat <<'EOF'
 #
 # netplan merges every file in this directory per key, and this one sorts after
-# 01-openmux.yaml, so this is what ${IFACE} uses; nothing else there was touched.
+# 01-openmux.yaml, so this is what the interface uses; nothing else there was touched.
 # set-ip rewrites this file whole, so an edit made here by hand is gone the next
 # time it runs: extra routes, search domains, or anything else it does not ask
 # about belongs in a file sorted after this one, e.g. 95-site.yaml.
@@ -336,11 +342,8 @@ yaml_for_static() {
 network:
   version: 2
   ethernets:
-    ${IFACE}:
-      dhcp4: false
-      addresses:
-        - ${a}
 EOF
+  printf '    %s:\n      dhcp4: false\n      addresses:\n        - %s\n' "$IFACE" "$a"
   [[ -n $g ]] && printf '      routes:\n        - to: default\n          via: %s\n' "$g"
   if [[ -n $ns ]]; then
     printf '      nameservers:\n        addresses:\n'
