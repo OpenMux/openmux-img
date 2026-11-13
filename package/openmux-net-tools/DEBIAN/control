@@ -1,5 +1,5 @@
 Package: openmux-net-tools
-Version: 1.1.0
+Version: 1.2.0
 Architecture: all
 Maintainer: OpenMux <support@openmux.io>
 Homepage: https://github.com/OpenMux/openmux-img
@@ -23,6 +23,13 @@ Description: Operator tool for the wired address on end0
  .
  Before applying it runs the real generator against the merge it is about to
  create, in a temporary root, and prints the unit the daemon will be given.
+ Alongside it is printed what NetworkManager itself says about end0, because
+ netplan decides which daemon it writes to and NetworkManager decides separately
+ whether a device is its own: a managed ethernet device with no profile gets one,
+ and whichever daemon configures the port last owns the address it ends up with.
+ The two lines differ exactly when both daemons have the port, which is how a
+ board that is up with no IPv4 address beside a correct netplan file is recognised
+ - read rather than inferred, and without a second tool.
  Applying restarts the daemon that owns end0, which over SSH is the session the
  command is typed in, so the rollback is a systemd timer rather than something in
  the tool's own process: it restores the previous file and re-applies it unless the
@@ -37,6 +44,8 @@ Description: Operator tool for the wired address on end0
  netplan.io provides the parser the file is validated with and the renderer the
  answer is read from; iproute2 provides the live address, route and reachability
  report; systemd provides networkctl, which says who owns the port, and
- systemd-run, which arms the rollback. resolvectl is used to show the DNS servers
- when systemd-resolved is present, and its absence is not fatal. sudo is what a
- non-root run re-executes itself through.
+ systemd-run, which arms the rollback. nmcli, when NetworkManager is installed, is
+ what reports NetworkManager's own state for the port; without it that line says so
+ and the run continues. resolvectl is used to show the DNS servers when
+ systemd-resolved is present, and its absence is not fatal. sudo is what a non-root
+ run re-executes itself through.

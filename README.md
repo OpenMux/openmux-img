@@ -276,7 +276,12 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   Before applying it runs the real generator over the merge it is about to create,
   in a temporary root (`netplan generate --root-dir`, which writes nothing outside
   it), and prints the unit the daemon will be given - read off the generator, as
-  the build-time gate does, for the same reason.
+  the build-time gate does, for the same reason. Next to it is what NetworkManager
+  itself reports about the port, printed and not acted on: netplan decides which
+  daemon it writes to, NetworkManager decides separately whether a device is its
+  own, and whichever daemon configures the port last owns the address - so the two
+  lines disagreeing is what "up, no IPv4 address, correct YAML" looks like from the
+  console.
   Applying is the part that can cut the session it is typed in, so the rollback is
   deliberately not in the tool's own process: it arms a systemd timer
   (`openmux-set-ip-rollback`) which restores the previous file and re-applies it

@@ -27,6 +27,13 @@
 # Mode 0600 on the file is not tidiness - a looser mode makes netplan warn from the
 # generator that runs on every boot, in the journal of every device.
 #
+# A port's address belongs to whichever daemon configured it last. netplan decides which
+# daemon it writes to; NetworkManager decides separately whether a device is its own, and
+# auto-creates a wired profile for a managed ethernet device that has none. So both
+# answers are printed: what networkctl says configured the port, and what NetworkManager
+# itself reports. They differ exactly when both daemons have it, which is the state where
+# a board is up with no IPv4 address beside a netplan file that reads correctly.
+#
 # Usage:
 #   set-ip                  show the current configuration, ask, write, apply
 #   set-ip --print          show the current configuration and change nothing
@@ -256,6 +263,21 @@ ask_nameservers() {
 }
 
 # --- what is configured now -------------------------------------------------
+# NetworkManager's own answer about the port, and only its own: nmcli says what that
+# daemon is doing with the interface where networkctl says what systemd-networkd was
+# told, and the two differ exactly when both of them have it. `unmanaged` is the answer
+# wanted for an interface netplan renders with networkd. An empty answer means there is
+# nothing to ask - nmcli absent, or the daemon not running, which both fail with a
+# non-zero exit - and an answer outside the usual words is printed as it came: the line is
+# there to be read, not judged.
+nm_state() {
+  local out=''
+  command -v nmcli >/dev/null 2>&1 || return 0
+  out=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null |
+        awk -F: -v i="$IFACE" '$1 == i { print $2; exit }') || out=''
+  printf '%s\n' "$out"
+}
+
 print_current() {
   local out f
   printf '%s now\n' "$IFACE"
@@ -283,6 +305,8 @@ print_current() {
   out=$(networkctl status "$IFACE" 2>/dev/null |
         sed -n 's/^[[:space:]]*Network Method:[[:space:]]*//p' | head -n1)
   printf '  configured by: %s\n' "${out:-(networkctl says nothing)}"
+  out=$(nm_state)
+  printf '  NetworkManager says: %s\n' "${out:-(NetworkManager is not running, or nmcli is absent)}"
   out=$(ip -4 addr show dev "$IFACE" 2>/dev/null | sed -n 's/^ *\(inet .*\)/      \1/p')
   printf '  live addresses:\n%s\n' "${out:-      (none)}"
   out=$(ip -4 route show default dev "$IFACE" 2>/dev/null | sed 's/^/      /')
