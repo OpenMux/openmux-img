@@ -99,8 +99,10 @@ layer/
   openmux-network/          netplan as the network configuration surface, rendered
                             by systemd-networkd: /etc/netplan/01-openmux.yaml
                             (end0 on DHCP, `renderer: networkd`), NetworkManager +
-                            iwd kept installed and enabled for any netdef that names
-                            `renderer: NetworkManager` (Wi-Fi, a modem), conf.d
+                            iwd installed, configured and NOT started - nothing in
+                            the shipped config or on the shipped hardware needs a
+                            wireless daemon; `systemctl enable --now NetworkManager`
+                            starts it and iwd follows over D-Bus, conf.d
                             (keyfile store, DNS left with resolved), wireguard-tools
                             for `tunnels:`. Nothing in /etc holds an opinion about
                             networkd - not masked, not wanted - because the renderer
@@ -178,7 +180,8 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   hard-requires `systemd-net-min` by name and therefore could not be given a
   different network manager.
 - Networking is netplan rendered by systemd-networkd, with NetworkManager and
-  iwd in the image for the netdefs that name it (`layer/openmux-network`). The
+  iwd in the image for the netdefs that name it, off until someone asks for them
+  (`layer/openmux-network`). The
   split is one key: `renderer:` at network level applies to the shipped config, and
   on an individual netdef hands that device to the other daemon. Nothing else in
   the image decides who owns an interface - which is why nothing under
@@ -189,6 +192,24 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   `wpa_supplicant` and every DHCP-client package stay absent because Recommends
   are off build-wide; neither daemon needs one (networkd has systemd's internal
   client, NetworkManager its own, and iwd is the Wi-Fi Supplicant).
+- `NetworkManager` and `iwd` are installed, configured and **not started**. Both arrive
+  enabled - upstream's `network-manager` layer runs `enable-units NetworkManager` and its
+  `iwd` layer runs `enable-units iwd`, and `NetworkManager.service`'s own `[Install]`
+  `Also=` adds the `NetworkManager-wait-online` unit and the dispatcher alias - and
+  neither has a job on a shipped board: the wired port is networkd's, there is no
+  wireless interface for `iwd` to serve, and `modemmanager` is not installed, so a
+  cellular netdef has no daemon to answer it either. The image's cleanup hook drops those
+  `wants` entries and masks nothing, which is the distinction that matters to whoever
+  adds a card: a mask makes `systemctl enable` itself fail until somebody runs `systemctl
+  unmask`, so the switch would be locked rather than off. One command turns the wireless
+  half on - `systemctl enable --now NetworkManager` - and `iwd` comes with it unasked,
+  because `net.connman.iwd` is a D-Bus activated service (Debian ships its
+  system-services file naming `SystemdService=iwd.service`). Two consequences of that
+  command are intended: `end0` stays networkd's, because the deny list above names it
+  before the daemon reads the directory (`nmcli device` lists it as `unmanaged`), and
+  `NetworkManager-wait-online` comes back through `Also=`, putting its 60 s ceiling on
+  `network-online.target` - the target that only `rescue-ssh.target` and an instantiated
+  `wg-quick@` wait for, the first being the case where waiting for a link is the point.
 - `systemd-networkd` is neither masked nor enabled, and that is a state with two
   failure directions, both of which `om-verify.sh` checks. A mask (or any symlink
   over the unit in `/etc/systemd/system`) is the silent one: netplan would still
@@ -233,8 +254,12 @@ device/openmux/.keep        (source-root placeholder; the CM5 device layer is th
   the generator produced networkd configs for - so moving a port to that renderer is
   one edit, in the YAML.
   Wi-Fi is deliberately absent from the shipped file: `wifis:` needs a PSK, images
-  ship no credentials - runtime nmcli + iwd as before, on a netdef that names the
-  NM renderer.
+  ship no credentials. The route to a wireless network is therefore two steps, both
+  written in the shipped file: start the daemon (`systemctl enable --now
+  NetworkManager`), then a second file in `/etc/netplan` whose netdef names the
+  NetworkManager renderer - `netplan` writes it a keyfile profile under `/run`, and it
+  is not in `unmanaged-devices`, so nothing keeps the daemon off it. Cellular needs
+  `modemmanager` installed as well; the image ships neither it nor a modem.
 - A WireGuard tunnel needs nothing installed beyond `wireguard-tools`, which
   `openmux-network` adds for `wg genkey`: netplan `tunnels:` with `mode: wireguard`
   renders to a `.netdev` for networkd or to a wireguard profile for NetworkManager,

@@ -268,8 +268,11 @@ ask_nameservers() {
 # told, and the two differ exactly when both of them have it. `unmanaged` is the answer
 # wanted for an interface netplan renders with networkd. An empty answer means there is
 # nothing to ask - nmcli absent, or the daemon not running, which both fail with a
-# non-zero exit - and an answer outside the usual words is printed as it came: the line is
-# there to be read, not judged.
+# non-zero exit. On this image the daemon is not started at boot at all (it is the
+# wireless half: `systemctl enable --now NetworkManager` starts it), so a blank here is
+# shipped state and not damage; `configured by:` is the line that carries the wired
+# port's owner either way. An answer outside the usual words is printed as it came: the
+# line is there to be read, not judged.
 nm_state() {
   local out=''
   command -v nmcli >/dev/null 2>&1 || return 0

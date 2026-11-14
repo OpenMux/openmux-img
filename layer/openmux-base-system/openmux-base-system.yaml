@@ -70,7 +70,8 @@
 #                              whose preset file makes the networkd units
 #                              enabled unless something masks them - see
 #                              layer/openmux-network.
-#   openmux-network            NetworkManager + iwd, plus systemd-resolved,
+#   openmux-network            NetworkManager + iwd, installed and started on
+#                              demand, plus systemd-resolved,
 #                              which its conf.d file names as the DNS backend -
 #                              see layer/openmux-network.
 #   openssh-server             sshd + first-boot host key generation. Also

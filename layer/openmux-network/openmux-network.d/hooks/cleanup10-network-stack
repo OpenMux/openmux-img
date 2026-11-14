@@ -1,42 +1,46 @@
 #!/bin/sh
 # Final network state of an OpenMux image: netplan states the configuration and the
-# renderer key chooses the daemon - systemd-networkd for what this image ships,
-# NetworkManager for any netdef that names it (Wi-Fi, a cellular modem). /bin/sh, as
-# in every runner hook here: the engine runs layer hook files directly, and the
-# shell behind /bin/sh has no arrays.
+# `renderer` key chooses the daemon - systemd-networkd for what this image ships,
+# NetworkManager for any netdef that names it. NetworkManager and iwd ship installed,
+# configured and NOT started, because nothing in the shipped config or on the shipped
+# hardware needs them at boot; this hook's job is to leave
+# `systemctl enable --now NetworkManager` working for whoever needs them. /bin/sh,
+# as in every runner hook here: the shell behind /bin/sh has no arrays.
 #
-# cleanup phase on purpose. All of this is one bdebstrap run: setup, packages,
-# then every plan layer's customize hooks in plan order, then every plan layer's
-# cleanup hooks. Anything here therefore runs after the layer that generates
-# networkd's .network files (rpi-device-base) and after whoever enabled what,
-# so the result does not depend on where this layer lands in the plan.
+# cleanup phase on purpose: setup, packages, every layer's customize hooks in plan
+# order, then every layer's cleanup hooks. This therefore runs after the device
+# layer's .network files and after whatever the layers enabled, whatever the plan
+# order is.
 set -eu
 
 ROOT="${1:?usage: cleanup10-network-stack <chroot-dir>}"
 
 fail() { printf 'openmux-network: %s\n' "$1" >&2; exit 1; }
 
-# --- both halves of the stack have to exist --------------------------------
-# Both checks guard a silent failure. enable-units reports "Unit ... not found.
-# Skipping" and exits 0; skipping it here would ship an image whose Wi-Fi has no
-# manager at all, because nothing in netplan claims wlan0 - NetworkManager's own
-# policy is the only thing that would ever bring it up. wifi.backend likewise:
-# wpa_supplicant is not installed (Recommends are off build-wide), so an absent
-# iwd backend leaves WPA with no mechanism behind it on every boot; an image that
-# cannot associate a WPA network is only detectable by booting it.
+# --- the wireless half has to be ENABLEABLE --------------------------------
+# Nothing here checks an enablement: the state this layer produces is "not started",
+# so what has to be true is the ability to start - the unit files exist and nothing in
+# /etc stands over them. The package checks stay because their failure is otherwise
+# silent: a unit enable-units cannot find reports "Unit ... not found. Skipping" and
+# exits 0, and a missing wifi.backend shows up only when a network has to be
+# associated - iwd is the only Supplicant this image could have, wpa_supplicant being
+# uninstalled with Recommends off build-wide.
 #
-# -x on a real path and -L on the wants entry, never -e on the wants entry: a
-# wants symlink points at an ABSOLUTE in-chroot path (/usr/lib/systemd/system/…)
-# and this hook runs outside the chroot, where that path means the build
-# container's own systemd - -e there answers about the container, not the image.
+# Test with -x on an executable and -f on a unit file, never -e on a symlink that
+# lives in the image: those point at absolute in-chroot paths and this hook runs
+# outside the chroot, where one names the build container's own systemd.
 [ -x "$ROOT/usr/sbin/NetworkManager" ] ||
    fail "$ROOT/usr/sbin/NetworkManager is not installed - network-manager is a Requires-level layer of openmux-network, so its package is missing for a reason unrelated to this hook"
 
-[ -L "$ROOT/etc/systemd/system/multi-user.target.wants/NetworkManager.service" ] ||
-   fail "NetworkManager.service is not enabled in $ROOT - the network-manager layer's enable-units step skipped it, and with it Wi-Fi and any cellular modem are left to no daemon at all: wired runs on networkd, so nothing would notice until a wireless network was wanted"
+for unit in NetworkManager.service iwd.service; do
+   [ -f "$ROOT/usr/lib/systemd/system/$unit" ] ||
+      fail "$ROOT/usr/lib/systemd/system/$unit is missing - 'systemctl enable --now NetworkManager' is how this image turns Wi-Fi on, and that stays one command only while the unit files are where systemd looks"
+   [ ! -L "$ROOT/etc/systemd/system/$unit" ] ||
+      fail "$ROOT/etc/systemd/system/$unit is a symlink (-> $(readlink "$ROOT/etc/systemd/system/$unit" 2>/dev/null || true)) - a mask there makes somebody else's enable command fail, and this layer turns a daemon off, not out of reach"
+done
 
 grep -qx 'wifi.backend=iwd' "$ROOT/etc/NetworkManager/conf.d/iwd.conf" 2>/dev/null ||
-   fail "$ROOT/etc/NetworkManager/conf.d/iwd.conf does not set wifi.backend=iwd - without iwd (or wpa_supplicant, which is not installed) NetworkManager has no Wi-Fi Supplicant"
+   fail "$ROOT/etc/NetworkManager/conf.d/iwd.conf does not set wifi.backend=iwd - without iwd (or wpa_supplicant, which is not installed) NetworkManager has no Wi-Fi Supplicant, and an image that cannot associate a WPA network is only detectable by booting it"
 
 # --- NetworkManager settings -----------------------------------------------
 # conf.d, never /etc/NetworkManager/NetworkManager.conf: that file is a conffile
@@ -59,39 +63,26 @@ dns=systemd-resolved
 EOF
 
 # --- netplan is the configuration surface ----------------------------------
-# The addressing is declared once, in netplan, so `netplan apply`/`netplan diff`
-# and one YAML file are the operator's interface, and the `renderer` key alone
-# decides which daemon applies it. systemd-networkd renders what this image ships;
-# NetworkManager stays installed, enabled and reachable per netdef
-# (`renderer: NetworkManager` on one device) for the interfaces nothing else can
-# configure - Wi-Fi, a cellular modem - which is also the only case that needs an
-# NM profile to exist at all.
-#
-# Written at network level the key covers every netdef that does not name a
-# renderer itself: netplan merges the files in this directory per key, lexically
-# later file wins, and the merged document keeps one global renderer. A site file
-# can move one device to NetworkManager without touching this file, or move
-# everything by naming `renderer: NetworkManager` itself. Whichever way the merge
-# lands, cleanup20-netplan-render runs the real generator against the result, so
-# the shipped config's verdict is known at build time rather than at first boot.
+# The addressing is declared once, in netplan, so one YAML file plus
+# `netplan apply`/`netplan diff` is the operator's interface and the `renderer` key
+# alone decides which daemon applies it. At network level that key covers every
+# netdef that does not name a renderer itself; netplan merges the directory per key,
+# lexically later file wins, so a site file can move one device or the whole config
+# to NetworkManager without editing this one. Either way
+# cleanup20-netplan-render runs the real generator over the merged result, so the
+# verdict is known at build time rather than at first boot.
 #
 # For a networkd netdef the generator writes
-# /run/systemd/network/10-netplan-end0.network (`[Network] DHCP=ipv4`, read by
-# networkd directly and served by systemd's own internal DHCP client - no client
-# package, and DNS goes to resolved, which this layer requires), plus a udev rule
-# placing end0 on NetworkManager's DENY list - a rule matching ENV{ID_NET_NAME}, which
-# udevd exports only for an interface a .link file claims, so it matches nothing while
-# the mask below stands, and cleanup20-netplan-render writes the deny list
-# NetworkManager does read from the output of that run. It also writes
-# /run/systemd/generator/multi-user.target.wants/systemd-networkd.service:
-# netplan enables the daemon itself, per boot, for exactly the netdefs that need
-# it - which is why nothing under /etc/ is written for networkd below. A config
-# whose netdefs all name NetworkManager gets neither the .network file nor the
-# wants entry, so naming a renderer is the whole handover in both directions.
+# /run/systemd/network/10-netplan-end0.network (networkd's own internal DHCP client,
+# no client package; DNS goes to resolved, which this layer requires) and enables the
+# daemon itself, per boot, as /run/systemd/generator/multi-user.target.wants/
+# systemd-networkd.service. Nothing under /etc is written for networkd because
+# nothing under /etc decides it - see the two sections below. The udev deny rule the
+# generator also writes is inert on this image, which is why cleanup20 derives
+# NetworkManager's deny list from the generated output instead.
 #
-# 0600 because netplan warns "Permissions for <file> are too open" otherwise, and
-# the warning comes from the generator: it would then be in the journal of every
-# device at every boot.
+# Mode 0600: netplan's generator warns "Permissions for <file> are too open"
+# otherwise, and that warning would be in every device's journal at every boot.
 install -d -m 0755 "$ROOT/etc/netplan"
 cat > "$ROOT/etc/netplan/01-openmux.yaml" <<'EOF'
 # OpenMux: netplan describes the configuration; the renderer key chooses which
@@ -115,6 +106,19 @@ network:
     end0:
       dhcp4: true
 #
+# The wireless half - NetworkManager and iwd - is installed and configured but not
+# started, because no netdef here names a wireless interface. To add one, start the
+# daemon and describe the interface:
+#
+#     systemctl enable --now NetworkManager
+#     then a file in this directory with `renderer: NetworkManager` on that device
+#
+# Starting NetworkManager does not take end0 away: conf.d/20-openmux-networkd.conf
+# denies NetworkManager exactly the interfaces netplan renders with networkd, so
+# `nmcli device` lists end0 as unmanaged and this file stays the only description
+# of it. A cellular modem would also need modemmanager, which this image does not
+# install.
+#
 # Asked to KEEP a connection (nmcli connection modify/add, nmtui), NetworkManager
 # writes its own file into this directory, 90-NM-<uuid>.yaml. It is generated from
 # the profile, so it is not edited by hand, and `nmcli connection delete <name>`
@@ -122,12 +126,21 @@ network:
 EOF
 chmod 600 "$ROOT/etc/netplan/01-openmux.yaml"
 
-# end0 only, on purpose. Wi-Fi cannot be expressed here without an SSID and a
-# PSK, and credentials do not belong in a shipped image, so wlan0 stays with
-# NetworkManager + iwd and the connections created at runtime. IPv6 likewise:
-# nothing here asks for dhcp6, an address or accept-ra, so networkd is left with
-# the default LinkLocalAddressing=ipv6 - a fe80:: address and no route, until a
-# site file asks for one.
+# end0 only, on purpose: Wi-Fi cannot be written here without an SSID and a PSK, and
+# credentials do not belong in a shipped image, so wlan0 stays with the connections
+# its operator creates at runtime, on the daemon that stays off until asked for.
+# Nothing asks for IPv6 either, which leaves networkd's default
+# `LinkLocalAddressing=ipv6` - a fe80:: address and no route.
+
+# The key is the one fact in the file, and it is a match condition and nothing else:
+# the generated .network name, the udev rule, wait-online's `-i <name>` drop-in and
+# NetworkManager's deny list are all derived from it. Keyed to a name the port does
+# not have - which is what `ip -br link` on the board says it has - the netdef matches
+# nothing, every derived name points at a port that is not there, and the port is left
+# to whichever daemon has no rule about it while the YAML reads perfectly. A build
+# cannot check the name: udev gives it on a board, and nothing under $ROOT is
+# authoritative for it. cleanup20-netplan-render runs the generator over the key as
+# written, which is the closest a build can come.
 
 # Checked rather than trusted: a file that lost its renderer line, or its mode,
 # still looks correct in a listing.
@@ -137,91 +150,94 @@ grep -qx '  renderer: networkd' "$np" 2>/dev/null ||
 [ "$(stat -c '%a' "$np" 2>/dev/null)" = 600 ] ||
    fail "$np is not mode 600 - netplan would warn on every boot"
 
-# NetworkManager's own netplan files must not be shipped. It writes one per
-# connection it is asked to keep, and that file names a renderer for its own
-# device, so a box carrying one has a device whose owner is decided by a file
-# nobody wrote, while a fresh build of the same source decides it from
-# 01-openmux.yaml - and the two then disagree silently. NetworkManager is never
-# started during a build, so one present here was written on a host tree and
-# carried in by an overlay or by key_file/post_install.
+# NetworkManager's own netplan files must not ship. Such a file names a renderer for
+# its device, so a box carrying one has a port whose owner is decided by a file nobody
+# wrote, while a fresh build of the same source decides it from 01-openmux.yaml.
+# NetworkManager is never started during a build, so one present here came from a host
+# tree - an overlay, or key_file/post_install.
 stray=$(find "$ROOT/etc/netplan" -maxdepth 1 -name '90-NM-*' -print 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
 if [ -n "$stray" ]; then
    fail "an NM-generated netplan profile would ship in this image: $stray - remove it from the source (delete the connection with nmcli, not by hand)"
 fi
 
-# --- no unit may block the boot on "link is up" ----------------------------
-# `systemctl enable NetworkManager` links NetworkManager-wait-online.service into
-# network-online.target.wants through its [Install] Also=, with a 60 s timeout
-# (NM_ONLINE_TIMEOUT). Normal boot is unaffected because nothing on this image
-# pulls network-online.target from /etc; the one unit that does is
-# rescue-ssh.target, shipped in /usr/lib, and that is exactly where a headless
-# device with no cable in the port should not lose a minute. With the wants entry
-# gone, network-online.target is reached at once and rescue SSH starts
-# immediately, with NetworkManager finishing addressing in the background.
+# --- the wireless half is off at boot --------------------------------------
+# Both units arrive enabled: the upstream network-manager layer runs
+# `$BDEBSTRAP_HOOKS/enable-units "$1" NetworkManager` - whose [Install] Also= also
+# links NetworkManager-wait-online.service and the nm-dispatcher alias - and the
+# upstream iwd layer runs `$BDEBSTRAP_HOOKS/enable-units "$1" iwd`. Neither has a job
+# on a shipped board: end0 is networkd's by the renderer key, there is no wireless
+# interface for iwd to serve, and modemmanager is not installed, so a cellular netdef
+# has no daemon either. Left enabled they add two daemons, two D-Bus names and an
+# nl80211 handler to every boot of hardware that cannot use them.
 #
-# Not masked: a masked unit that something still Wants= is a failed dependency
-# job, and a package upgrade that re-runs enable restores this entry, so the mask
-# would trade a bounded delay for boot-time noise. Dropping the symlink is
-# idempotent, and om-verify.sh checks it stayed dropped.
+# Removed from the target rather than masked, which is the whole difference for the
+# operator: masking makes `systemctl enable` itself fail until somebody runs
+# `systemctl unmask`, and adding a Wi-Fi card is a decision for the person holding the
+# card. The command above starts the daemon and iwd comes with it unasked - Debian
+# ships /usr/share/dbus-1/system-services/net.connman.iwd.service with
+# `SystemdService=iwd.service`, so the first call to net.connman.iwd activates
+# iwd.service (Type=dbus, BusName=net.connman.iwd) by itself. The nm-dispatcher alias
+# in /etc/systemd/system stays: it is not an enable, its unit has no [Install]
+# WantedBy, and a bare `systemctl start NetworkManager` still needs that step.
 #
-# systemd-networkd-wait-online.service is NOT treated the same way, and cannot be:
-# for a networkd netdef the generator adds it to network-online.target itself, in
-# /run, every boot (with a drop-in running `-i end0:degraded` then
-# `--any -o routable -i end0`). Removing an /etc entry would not reach that, and
-# masking it would produce exactly the failed job described above. Nothing on this
-# image has Wants=network-online.target - apt-daily only orders itself After= it -
-# so the only unit that can wait on it is rescue-ssh.target, which a normal boot
-# never reaches; the ceiling applies to the rescue path, where it is the delay
-# worth having.
-rm -f "$ROOT/etc/systemd/system/network-online.target.wants/NetworkManager-wait-online.service"
+# NetworkManager-wait-online.service goes with them: its 60 s ceiling
+# (NM_ONLINE_TIMEOUT) lands on network-online.target, which rescue-ssh.target and
+# wg-quick@.service want - a headless board with no cable in the port must not lose a
+# minute there. Dropped, not masked, because a masked unit something still Wants= is a
+# failed dependency job. Enabling NetworkManager re-links it, which is the right way
+# round: the operator asked for the link-up wait.
+#
+# systemd-networkd-wait-online.service is left alone deliberately: for a networkd
+# netdef the generator adds it to the target under /run every boot, so an /etc entry
+# is not what puts it there and masking it would only produce the failed job above.
+for unit in NetworkManager.service NetworkManager-wait-online.service iwd.service; do
+   rm -f "$ROOT"/etc/systemd/system/*.wants/"$unit"
+done
+
+# An absence, so a glob that matched nothing cannot stand as the verdict. Same
+# no--e rule as above: on these paths it would ask the build container's systemd about
+# its own units.
+for unit in NetworkManager.service iwd.service; do
+   left=$(ls "$ROOT"/etc/systemd/system/*.wants/"$unit" 2>/dev/null | tr '\n' ' ')
+   [ -z "$left" ] ||
+      fail "$unit is still wanted by $left - the wireless half would start on every boot to manage interfaces this board does not have, which is the state this step exists to remove"
+done
 
 # --- networkd's own .network files must not survive ------------------------
-# Written by the engine's device layer, whose customize hook runs
-# `$LAYER_HOOKS/systemd/netgen eth0` and `netgen wlan0` into the two fixed paths
-# below (layer/rpi/device/family-base.yaml), whatever the ports on the board are
-# actually called. That is why this runs in cleanup rather than in a customize hook
-# ordered by a Requires edge: the files have to be gone after it, not before it.
+# The engine's device layer writes them with `$LAYER_HOOKS/systemd/netgen eth0` and
+# `netgen wlan0` into the two fixed paths below (layer/rpi/device/family-base.yaml),
+# whatever the board's ports are called - which is why this hook is in cleanup: the
+# files have to be gone after that hook, not before it.
 #
-# /etc/systemd/network is networkd's own config source - read directly, not through
-# netplan - so a file there whose `[Match] Name=` is the port that booted applies
-# alongside netplan's /run/systemd/network/10-netplan-<name>.network: two
-# descriptions of one port, two DHCP clients, two sets of routes, and `netplan
-# apply` neither reads nor removes the /etc one. `wlan0` is the live name of the
-# Wi-Fi a site adds, which is why both paths go rather than only the one this board
-# does not use.
+# /etc/systemd/network is networkd's own config source, read without netplan, so a
+# leftover applies alongside netplan's /run/systemd/network/10-netplan-<name>.network:
+# one port described twice, two DHCP clients, two sets of routes, and `netplan apply`
+# neither reads nor removes the /etc one. `wlan0` is the live name of the Wi-Fi a site
+# adds, so both paths go.
 rm -f "$ROOT/etc/systemd/network/01-eth0.network"
 rm -f "$ROOT/etc/systemd/network/02-wlan0.network"
 
-# --- /etc keeps no opinion about networkd ---------------------------------
-# Neither masked nor enabled: the netplan renderer key is the switch, and the
-# generator operates it per boot. For a netdef that needs the daemon it writes
-# /run/systemd/generator/multi-user.target.wants/systemd-networkd.service itself,
-# and for a config whose netdefs all name NetworkManager it writes no such entry.
-# That output is regenerated below /run every boot, so `systemctl enable` and
-# `systemctl disable` are not the levers here and neither one wins an argument with
-# the YAML - the state this layer has to produce is therefore silence in /etc.
-#
-# What must not be present is a leftover OPINION, because each one outranks the
-# renderer key and none of them is visible in the YAML:
-#   * a mask (a symlink to /dev/null, what `systemctl mask` leaves) is the loudest
-#     failure this image can have: netplan would still write end0's .network and
-#     still ask for the daemon, a masked unit is never started, and the device
-#     boots with no wired address and a failed job while its netplan file reads
-#     perfectly;
-#   * a .wants entry - from a hand `systemctl enable`, or from
+# --- /etc keeps no opinion about networkd ----------------------------------
+# Neither masked nor enabled: the renderer key is the switch and the generator
+# operates it per boot, under /run. `systemctl enable`/`disable` are therefore not the
+# levers here and neither wins an argument with the YAML, so the state to produce is
+# silence in /etc. What must not be present is a leftover OPINION, because each one
+# outranks the renderer key and none of them is visible in the YAML:
+#   * a mask (a symlink to /dev/null) is the loudest failure this image can have:
+#     netplan would still write end0's .network and still ask for the daemon, a masked
+#     unit is never started, and the device boots with no wired address and a failed
+#     job while its netplan file reads perfectly;
+#   * a .wants entry - a hand `systemctl enable`, or
 #     /usr/lib/systemd/system-preset/90-systemd.preset, which ships `enable
-#     systemd-networkd.service`, `-wait-online` and `-network-generator` and is
-#     also how systemd-pstore.service ended up enabled here unasked - starts the
-#     daemon on every boot even for an image whose netdefs all name
-#     NetworkManager; with any .network file present that is a second DHCP client
-#     on a port netplan assigned elsewhere;
-#   * dbus-org.freedesktop.network1.service, networkd's [Install] Alias, which is
-#     also the unit `networkctl` starts through D-Bus activation.
+#     systemd-networkd.service`, `-wait-online` and `-network-generator` - starts the
+#     daemon on every boot even for a config that names NetworkManager everywhere;
+#   * dbus-org.freedesktop.network1.service, networkd's [Install] Alias, which is also
+#     the unit `networkctl` starts through D-Bus activation.
 # Unit names, split on spaces below - no globbing and no spaces in a unit name.
 networkd_units='systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service systemd-network-generator.service dbus-org.freedesktop.network1.service'
 
-# Done with rm/readlink rather than systemctl: this phase's mounts belong to
-# mmdebstrap, and the hook then needs no /proc and no bus in the chroot.
+# rm/readlink rather than systemctl: this phase's mounts belong to mmdebstrap, so the
+# hook needs neither /proc nor a bus in the chroot.
 for unit in $networkd_units; do
    rm -f "$ROOT"/etc/systemd/system/*.wants/"$unit"
    if [ "$(readlink "$ROOT/etc/systemd/system/$unit" 2>/dev/null || true)" = /dev/null ]; then
@@ -229,9 +245,8 @@ for unit in $networkd_units; do
    fi
 done
 
-# Checked rather than trusted: each removal is a no-op if a path moves, and what
-# is being asserted is the ABSENCE of four kinds of state, which no listing shows
-# unless every path is looked at.
+# Checked rather than trusted: each removal is a no-op if a path moves, and what is
+# asserted is an ABSENCE, which no listing shows unless every path is looked at.
 for unit in $networkd_units; do
    p="$ROOT/etc/systemd/system/$unit"
    state=$(readlink "$p" 2>/dev/null || true)
@@ -245,42 +260,23 @@ for unit in $networkd_units; do
 done
 
 # --- what udev is left to name ---------------------------------------------
-# Naming on this image is done by udev, not by the kernel alone: no
-# net.ifnames=0 reaches the kernel cmdline (cmdline.txt is assembled from the
-# preimage cmdline.d fragments and none of them carries a naming option), so what
-# udev is configured to do is what happens.
+# udev names the interfaces here, not the kernel alone: no net.ifnames=0 reaches the
+# kernel cmdline, so what udev is configured to do is what happens. These two null
+# .link files come from the engine's minimal-systemd stack
+# (layer/sys-apps/systemd-net-min.yaml) and are kept because the state they produce is
+# about udev, not about which daemon renders netplan: a masked .link is never parsed,
+# so 99-default.link's NamePolicy= never runs and 73-usb-net-by-mac.link never offers
+# enx<mac>, and a plug-in provisioning adapter or gadget keeps the name it arrived
+# with. Losing them is quiet - what notices is a config that names an interface by its
+# old name.
 #
-# These two null .link files are systemd.link(5) input, applied by systemd-udevd,
-# so which daemon renders netplan has no bearing on them. Their owner is the
-# engine's minimal-systemd stack (layer/sys-apps/systemd-net-min.yaml); this layer
-# keeps them because the state they produce is about udev: a unit masked to
-# /dev/null is never parsed, so 99-default.link's NamePolicy= never runs and
-# 73-usb-net-by-mac.link's enx<mac> is never offered, and a USB adapter or a
-# gadget keeps the name it arrived with - which is what a provisioning adapter has
-# to keep for whoever plugs it in in the field. Losing them is not loud either:
-# what notices is a connection created with ifname=<name>, or an operator typing a
-# device name that is not there.
-#
-# The wired port is not named by either file: it is `end0` with both masks in
-# place, and `networkctl status end0` reports `Link File: n/a`, which is what a
-# masked .link looks like from a device. The port is the RP1 GMAC - the device tree
-# node aliased ethernet0, `ethernet@100000`, compatible `cdns,macb`, driver `macb`
-# - and its name is udev's, not the kernel's: /sys/class/net/end0/name_assign_type
-# is 4 (renamed), where 1 would be the kernel's own enumeration name; the
-# MAC-derived form `enx<mac>` survives only as an Alternative Name, which is the
-# spelling udev did not settle on. A build cannot confirm any of that: the name
-# exists once systemd-udevd has matched the device on a board, so nothing under
-# $ROOT - device tree blobs included - is authoritative for it. What this phase can
-# check is what cleanup20-netplan-render checks: the real generator run over the
-# key as written, so the merge, the enablement and the deny rule come from that key
-# whatever it is spelled as.
-#
-# The key is worth that much care because it is a match condition and nothing else:
-# `[Match] Name=`, NetworkManager's deny rule and the `-i <name>` in
-# systemd-networkd-wait-online's drop-in are all derived from it. Keyed to a name
-# the port does not have, the netdef selects nothing and the deny rule denies
-# nothing, leaving the port to whichever daemon has no rule keeping it off - while
-# the YAML that describes it still reads perfectly.
+# The wired port is named by neither file: it is `end0` with these masks in place, and
+# `networkctl status end0` reports `Link File: n/a` on a board. That name has to be
+# the key in 01-openmux.yaml, which is why the key is checked there rather than here:
+# a rename of the GMAC would leave the netdef, the generated names and the deny list
+# describing a port that is not there, and the port to whichever daemon has no rule
+# about it. No build can confirm a name - only a board, through udev - so these links
+# are checked for their state and the key is checked by the generator run.
 install -d -m 0755 "$ROOT/etc/systemd/network"
 ln -sfn /dev/null "$ROOT/etc/systemd/network/99-default.link"
 ln -sfn /dev/null "$ROOT/etc/systemd/network/73-usb-net-by-mac.link"

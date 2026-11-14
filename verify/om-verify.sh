@@ -85,8 +85,27 @@ network_stack() { # network_stack <root> <label>
   echo "  -- network stack: netplan rendered by systemd-networkd ($t)"
   [ -x "$r/usr/sbin/NetworkManager" ] && ok "$t: NetworkManager installed" \
     || bad "$t: /usr/sbin/NetworkManager missing"
-  is_wanted "$r" multi-user NetworkManager.service \
-    && ok "$t: NetworkManager enabled" || bad "$t: NetworkManager not enabled"
+  # The wireless half ships ENABLEABLE and OFF: no .wants entry for either unit, since
+  # the shipped config has no wireless interface and no modemmanager for a cellular one,
+  # and no mask either, because `systemctl enable --now NetworkManager` is the operator's
+  # route to a Wi-Fi card and a mask is precisely what makes that command fail. A missing
+  # unit file fails the same command, so its presence is asserted with its absence from
+  # the targets. iwd belongs to the same pair: NetworkManager reaches it over D-Bus
+  # (/usr/share/dbus-1/system-services/net.connman.iwd.service names SystemdService=), so
+  # it needs no wants entry of its own to be there when it is needed.
+  for u in NetworkManager.service iwd.service; do
+    is_absent "$r/usr/lib/systemd/system/$u" \
+      && bad "$t: $u is in no unit path, so the wireless half cannot be switched on" \
+      || ok "$t: $u present for systemctl to enable"
+    wanted=$(ls "$r"/etc/systemd/system/*.wants/"$u" 2>/dev/null | tr '\n' ' ')
+    if is_masked "$r/etc/systemd/system/$u"; then
+      bad "$t: $u is masked, so the operator's enable command fails - off at boot is intended, unreachable is not"
+    elif [ -n "$wanted" ]; then
+      bad "$t: $u is wanted by $wanted: a daemon with no interface to manage starts on every boot"
+    else
+      ok "$t: $u starts on demand, not at boot"
+    fi
+  done
   # The two decisions the layer owns, and the backend it depends on.
   chk "$t: NM settings store is keyfile" "$r/etc/NetworkManager/conf.d/10-openmux.conf" '^plugins=keyfile$'
   chk "$t: NM delegates DNS to resolved" "$r/etc/NetworkManager/conf.d/10-openmux.conf" '^dns=systemd-resolved$'

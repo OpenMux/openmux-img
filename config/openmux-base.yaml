@@ -25,8 +25,9 @@
 # The base system, composed in this repo rather than inherited from the
 # engine's `trixie-minbase` suite layer: the same Debian trixie rootfs, apt
 # suite, kernel/utility layers, systemd, resolved, timesyncd and ssh, with the
-# network manager chosen by name - NetworkManager with iwd behind it, and
-# systemd-networkd masked. See layer/openmux-base-system for what each member
+# network manager chosen by name - NetworkManager with iwd behind it, installed and
+# left off until asked for, while systemd-networkd renders the shipped config without
+# being enabled in /etc. See layer/openmux-base-system for what each member
 # is for and layer/openmux-network for what makes the choice exclusive; the
 # reason the list lives here at all is that `RequiresProvider` never selects a
 # provider between contenders, so whatever a suite layer names is what a build

@@ -3,17 +3,22 @@
 # X-Env-Layer-Category: openmux
 # X-Env-Layer-Desc: netplan as the image's network configuration surface, with
 # X-Env-Layer-Desc: systemd-networkd as the renderer for what it ships and
-# X-Env-Layer-Desc: NetworkManager kept for the netdefs that name it. `renderer:`
-# X-Env-Layer-Desc: works at network level and per netdef, so a Wi-Fi card or a
+# X-Env-Layer-Desc: NetworkManager installed for the netdefs that name it, and not
+# X-Env-Layer-Desc: started: nothing in the shipped config, or on the shipped hardware,
+# X-Env-Layer-Desc: needs a wireless daemon at boot - see (8). `renderer:` works at
+# X-Env-Layer-Desc: network level and per netdef, so a Wi-Fi card or a
 # X-Env-Layer-Desc: cellular modem is added by naming `renderer: NetworkManager` on
 # X-Env-Layer-Desc: that one device: netplan then writes it a keyfile profile under
 # X-Env-Layer-Desc: /run, which is all the allow half needs. The deny half is not
 # X-Env-Layer-Desc: netplan's to do on this image - see (7) - so end0 is kept off
 # X-Env-Layer-Desc: NetworkManager by this layer. iwd is the Supplicant behind the
-# X-Env-Layer-Desc: wireless half. The upstream layers do the installing - network-manager
-# X-Env-Layer-Desc: adds the package and enables NetworkManager, network-manager-iwd
-# X-Env-Layer-Desc: pulls iwd and writes conf.d/iwd.conf - and this layer owns what
-# X-Env-Layer-Desc: they cannot express:
+# X-Env-Layer-Desc: wireless half. The upstream layers do the installing and the
+# X-Env-Layer-Desc: enabling: this layer Requires network-manager-iwd, which Requires
+# X-Env-Layer-Desc: network-manager (adds NetworkManager, enables it) and iwd (adds iwd,
+# X-Env-Layer-Desc: enables it), and
+# X-Env-Layer-Desc: network-manager-iwd itself only writes conf.d/iwd.conf, the
+# X-Env-Layer-Desc: wifi.backend line that joins them. What this layer owns is what they
+# X-Env-Layer-Desc: cannot express:
 # X-Env-Layer-Desc: (1) /etc/netplan/01-openmux.yaml, the shipped wiring: end0 on
 # X-Env-Layer-Desc: DHCP and `renderer: networkd` at network level. networkd is
 # X-Env-Layer-Desc: netplan(5)'s default renderer and the file states it anyway,
@@ -66,8 +71,11 @@
 # X-Env-Layer-Desc: config's own answer to "is the link up", with the drop-in
 # X-Env-Layer-Desc: netplan
 # X-Env-Layer-Desc: writes limiting it to end0. Nothing in the image Wants=
-# X-Env-Layer-Desc: network-online.target, so neither waiter is on an ordinary boot
-# X-Env-Layer-Desc: path; only rescue-ssh.target requires it.
+# X-Env-Layer-Desc: network-online.target on an ordinary boot path, so neither waiter is
+# X-Env-Layer-Desc: on one: the units that want it are rescue-ssh.target, reached by
+# X-Env-Layer-Desc: booting into it, and wg-quick@, reached by instantiating it - and
+# X-Env-Layer-Desc: this image's tunnels are netplan `tunnels:`, which networkd brings up
+# X-Env-Layer-Desc: without either unit.
 # X-Env-Layer-Desc: (6) conf.d/10-openmux.conf pins the settings store to keyfile
 # X-Env-Layer-Desc: and
 # X-Env-Layer-Desc: leaves DNS with systemd-resolved, which this layer therefore
@@ -89,6 +97,19 @@
 # X-Env-Layer-Desc: interfaces netplan renders with networkd - per interface, never
 # X-Env-Layer-Desc: `*`, because a netdef naming that renderer produces a
 # X-Env-Layer-Desc: .nmconnection instead of a .network and has to stay manageable.
+# X-Env-Layer-Desc: (8) the wireless half is switched off rather than taken out: the
+# X-Env-Layer-Desc: wants entries for NetworkManager.service and iwd.service are dropped,
+# X-Env-Layer-Desc: and neither unit is masked, so `systemctl enable --now
+# X-Env-Layer-Desc: NetworkManager` starts it and brings iwd with it unasked -
+# X-Env-Layer-Desc: net.connman.iwd is a D-Bus activated service
+# X-Env-Layer-Desc: (Type=dbus, BusName=net.connman.iwd, and Debian ships its
+# X-Env-Layer-Desc: system-services file naming SystemdService=iwd.service). Masking is
+# X-Env-Layer-Desc: the stronger lock and the wrong one here: it makes the enable command
+# X-Env-Layer-Desc: itself fail, and putting a Wi-Fi card in a box is a decision for
+# X-Env-Layer-Desc: whoever is holding the card, not a verdict baked into an image. What
+# X-Env-Layer-Desc: makes that command safe to run is (7): a started NetworkManager takes
+# X-Env-Layer-Desc: every ethernet device not denied to it, and the deny list is why the
+# X-Env-Layer-Desc: wired port stays networkd's afterwards.
 # X-Env-Layer-Desc: wireguard-tools is the one package this layer adds. A WireGuard
 # X-Env-Layer-Desc: tunnel needs no plugin on either renderer: netplan `tunnels:`
 # X-Env-Layer-Desc: with
@@ -106,11 +127,12 @@
 # X-Env-Layer-Desc: end0 has no credentials to bake and takes its address from DHCP.
 # X-Env-Layer-Desc: Wi-Fi and cellular are absent from the shipped file for one
 # X-Env-Layer-Desc: reason
-# X-Env-Layer-Desc: each - `wifis:` needs an SSID and a PSK, `modems:` needs the
-# X-Env-Layer-Desc: modemmanager daemon - so those netdefs arrive as site
-# X-Env-Layer-Desc: configuration, and the per-netdef renderer is what makes that a
+# X-Env-Layer-Desc: each - `wifis:` needs an SSID and a PSK, `modems:` needs
+# X-Env-Layer-Desc: modemmanager, which is not installed at all - so those netdefs
+# X-Env-Layer-Desc: arrive as site configuration, and the per-netdef renderer is what
+# X-Env-Layer-Desc: makes that a
 # X-Env-Layer-Desc: supported route rather than a change of design.
-# X-Env-Layer-Version: 1.3.0
+# X-Env-Layer-Version: 1.4.0
 # X-Env-Layer-Requires: network-manager-iwd,systemd-resolved
 # X-Env-Layer-Provides: openmux-network
 #
@@ -137,14 +159,16 @@ mmdebstrap:
 # even then a later layer could re-create them), and this hook is the last writer
 # of unit state before the filesystem is captured.
 #
-# Two of the steps are guarded, because an unguarded failure here removes the
-# image's networking without saying so:
+# Two of the steps are guarded, because an unguarded failure here takes something
+# away quietly:
 #   * the network-manager layer enables the unit through $BDEBSTRAP_HOOKS/
 #     enable-units, which prints "Unit ... not found. Skipping" and exits 0 when
-#     the unit is absent - so the hook checks that NetworkManager is wanted and
-#     that the networkd units exist before writing any of this layer's state, and
-#     fails the build rather than shipping an image where no daemon manages a
-#     link;
+#     the unit is absent - so the hook checks that the NetworkManager and iwd unit
+#     files exist and carry no /etc symlink, and that the networkd units exist,
+#     before writing any of this layer's state. What that guard protects now is the
+#     ability to start the wireless half: this layer removes its wants entries, so a
+#     missing or masked unit file would leave an image whose Wi-Fi cannot be turned
+#     on at all;
 #   * wifi.backend=iwd is checked for the same reason: with neither iwd nor
 #     wpa_supplicant in the image, WPA has no backend at all, and an image that
 #     cannot associate a WPA network is only detectable by booting it.
@@ -177,15 +201,19 @@ mmdebstrap:
 #
 # Deliberately NOT done here:
 #   * `wifis:` or `modems:` in the shipped netplan. Both render through
-#     NetworkManager; a netplan Wi-Fi configuration means a shipped credential and
-#     a modem entry needs a daemon (modemmanager) that no shipped hardware requires
-#     yet. The route is documented in cleanup10-network-stack rather than left
-#     half-configured here.
+#     NetworkManager, which this layer leaves installed and stopped: a Wi-Fi netplan
+#     entry means a shipped credential, and a modem entry needs a daemon
+#     (modemmanager) that is not installed. The route - start the daemon, add a file
+#     naming its renderer - is written in the shipped YAML rather than half-configured
+#     here.
 #   * masking systemd-networkd-wait-online.service. The generator pulls it into
 #     network-online.target.wants per boot, in /run, so masking it would only make
 #     the config's own verdict unreadable, and the drop-in netplan writes limits it
 #     to end0. Nothing in the image Wants= network-online.target.
-#   * masking iwd.service: iwd is the Wi-Fi backend, it has to run.
+#   * masking iwd.service. Its wants entry goes with NetworkManager's, and nothing
+#     else: iwd is D-Bus activated, so NetworkManager starts it the first time it
+#     needs 802.11, and a mask would take away the response to that call rather than
+#     the daemon's place in the boot order.
 #   * touching /etc/iwd/main.conf. EnableNetworkConfiguration=false is a conffile
 #     of the Debian iwd package and is what NetworkManager wants: iwd answers
 #     802.11, the manager owns addressing.

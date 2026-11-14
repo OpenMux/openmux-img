@@ -1,65 +1,53 @@
 #!/bin/sh
-# Does the netplan configuration in this image do what the shipped design says,
-# when the generator runs the way SYSTEMD runs it?
+# Does this image's netplan config do what the design says, when the generator runs
+# the way SYSTEMD runs it?
 #
-# cleanup10-network-stack writes /etc/netplan/01-openmux.yaml with
-# `renderer: networkd`, and that one key decides which daemon configures the wired
-# port - and whether systemd-networkd is started at all, because the generator enables
-# the daemon itself, per boot, for exactly the netdefs that name it. It does not decide
-# what the other daemon does with the same port: keeping NetworkManager off an interface
-# it would otherwise manage is a separate fact, with its own file, and the generator's
-# output is the only reading of the config that says which interfaces it applies to.
-# That file is therefore written here, from that output, and the rest of this hook is
-# the verdict on it. None of it is visible in the image: every byte of the generator's
-# work lands in /run, which is a tmpfs at boot. A config that quietly ends up on another
-# renderer, or on two daemons at once, therefore shows up as a device with no wired
-# address and nothing wrong at build time. So it is not left to the next boot.
+# cleanup10-network-stack writes /etc/netplan/01-openmux.yaml with `renderer:
+# networkd`, and that key decides which daemon configures the wired port - and whether
+# systemd-networkd starts at all, because the generator enables the daemon itself, per
+# boot, for the netdefs that name it. What it does not decide is what the other daemon
+# does with the same port: keeping NetworkManager off an interface it would otherwise
+# manage is a separate fact with its own file, and only the generator's output says
+# which interfaces it applies to. That file is written here, from that output. Nothing
+# of this is visible in the image - every byte of the generator's work lands in /run,
+# a tmpfs at boot - so a config that lands on another renderer, or on two daemons,
+# looks fine at build time and shows up as a device with no wired address. Hence
+# running the generator for real and reading its output: what several files MERGE into
+# is netplan's decision, not something a second reader of the YAML can claim.
 #
-# The generator is run here for real and its output is read. Running it is the only
-# way to ask the question: what one file says is easy to read, what SEVERAL files
-# merge into is decided by netplan, and what the merged result turns into - which
-# daemon, which interface, whether that daemon is started - is decided by the
-# generator's own code.
+# Generator mode, not `netplan generate`: the binary behaves according to argv[0] and
+# argc. Only as .../system-generators/netplan, with the three directories systemd
+# passes, does it write the wants entries a boot really gets. Judging the CLI form
+# would prove nothing about boot.
 #
-# Generator mode matters, not `netplan generate`: the same binary behaves according
-# to argv[0] and argc. Called as .../system-generators/netplan with the three
-# directories systemd passes (normal, early, late) it writes the wants entries a
-# boot really gets; called any other way it refuses ("can not be called directly")
-# or reads a positional argument as an input file, and writes no wants entry at
-# all. Judging the CLI form would prove nothing about boot.
-#
-# What is checked is the generator's output AND its silence. A non-zero exit is the
-# easy case; netplan discards what it cannot parse and exits 0, so a file with a
-# syntax error, or a single netdef with an unknown key, contributes nothing at boot
-# while the build still reports success. Only the warning it prints says so, and this
-# hook treats any warning as a failure.
+# The output is checked AND the silence. A non-zero exit is the easy case: netplan
+# discards what it cannot parse and exits 0, so a syntax error or one unknown key
+# contributes nothing at boot while the build reports success. Only the warning says
+# so, and any warning fails this hook.
 #
 # cleanup phase, after cleanup10 in the same layer (hooks run in name order): it
-# judges what cleanup10 wrote. /bin/sh like every runner hook here, because the
-# shell behind /bin/sh has no arrays.
+# judges what cleanup10 wrote. /bin/sh like every runner hook here - no arrays.
 set -eu
 
 ROOT="${1:?usage: cleanup20-netplan-render <chroot-dir>}"
 
 fail() { printf 'openmux-network: %s\n' "$1" >&2; exit 1; }
 
-# The path varies by distribution (/usr/bin, /usr/sbin), and a hook that assumed
-# one would report a missing file instead of the missing tool.
+# The path varies by distribution (/usr/bin, /usr/sbin); assuming one would report a
+# missing file instead of a missing tool.
 CHROOT=$(command -v chroot) || fail "chroot is not on PATH in the build container"
 
-# Reached through the system-generators name because that name IS the mode switch -
-# and because a file systemd would not find there could not run at boot either.
+# Reached through the system-generators name because that name IS the mode switch.
 GEN=/usr/lib/systemd/system-generators/netplan
 [ -x "$ROOT$GEN" ] ||
    fail "$ROOT$GEN is not executable - netplan-generator ships it, and netplan.io is a hard dependency of the Raspberry Pi build of network-manager, so this is a package-set problem, not a netplan problem"
 [ -d "$ROOT/etc/netplan" ] ||
    fail "$ROOT/etc/netplan does not exist - cleanup10-network-stack writes the file this hook judges"
 
-# Every artifact named below is named after the netdef, so the name is read out of
-# the file rather than repeated here: the netdef key is the one fact, and a check
-# pinned to a spelling keeps passing after the key moves. Read with cleanup10's
-# shape, and checked before use, because an empty name would turn each pattern
-# below into one that matches whatever it exists to reject.
+# Every artifact named below is named after the netdef, so the name is read out of the
+# file rather than repeated here: a check pinned to a spelling keeps passing after the
+# key moves. Checked before use, because an empty name would turn each pattern below
+# into one that matches whatever it exists to reject.
 np="$ROOT/etc/netplan/01-openmux.yaml"
 [ -f "$np" ] || fail "$np does not exist - cleanup10-network-stack writes it, and this hook judges it"
 IFACE=$(awk '/^  ethernets:/{f=1;next} f&&/^    [a-z][a-z0-9-]*:/{sub(/:.*/,"");gsub(/[[:space:]]/,"");print;exit}' "$np")
@@ -68,29 +56,27 @@ case $IFACE in
       fail "no wired netdef could be read out of $np (read: '${IFACE:-nothing}') - every generated name asserted below is built from it, so a verdict here would mean nothing" ;;
 esac
 
-# Generator output goes to ABSOLUTE /run paths inside the root it runs in, so this
-# run does write into the image. That is the one part of the design that cannot be
-# judged from a copy of /etc: `-r` redirects the input, not the output, and it is
-# the output systemd acts on. The state is therefore recorded first and restored
-# afterwards, and the restore is CHECKED rather than attempted (see the end of this
-# hook): a generated file captured into the image would describe a boot that never
-# happened, sitting under /run with nothing in the image to explain it.
+# The generator writes ABSOLUTE /run paths inside the root it runs in, so this run
+# does write into the image - the one part of the design that cannot be judged from a
+# copy of /etc, since `-r` redirects the input and it is the output systemd acts on.
+# The state is therefore recorded first and restored afterwards, and the restore is
+# CHECKED (see the end of this hook): a generated file captured into the image would
+# describe a boot that never happened, sitting under /run with nothing to explain it.
 #
 # GD is the generator directory handed to the binary - one directory, passed three
-# times, because netplan writes its wants entries under the first argument and
-# modern systemd passes three. The name belongs to this hook and is removed
-# wholesale, which also disposes of netplan.stamp: while that stamp exists the
-# generator refuses to run twice ("netplan generate already ran"), so a leftover
-# would silence every later run.
+# times, because netplan writes its wants entries under the first argument while
+# modern systemd passes three. It is removed wholesale, which also removes
+# netplan.stamp: while that stamp exists the generator refuses to run twice ("netplan
+# generate already ran"), so a leftover would silence every later run.
 GD=/run/systemd/generator/openmux-netplan-check
 RUN="$ROOT/run"
 BEFORE=$(mktemp)
 AFTER=$(mktemp)
 LOG=$(mktemp)
 
-# undo() puts the root back the way BEFORE recorded it. It is the trap's job as
-# well as the success path's, so a FAILED verdict cannot leave the generator's
-# output in a chroot a later phase might still look at.
+# undo() puts the root back the way BEFORE recorded it. It is the trap's job as well
+# as the success path's, so a FAILED verdict cannot leave output in a chroot a later
+# phase might still look at.
 undo() {
    [ -n "${ROOT:-}" ] || return 0
    rm -rf "${ROOT}${GD}"
@@ -117,18 +103,17 @@ undo() {
       rmdir "$d" 2>/dev/null || true
    done
 }
-# Installed before anything is created and before the first failure point, and every
-# path in it is a literal or assigned above, so it can never expand to an empty path
-# and no exit path can leave generated files behind.
+# Installed before anything is created or can fail, and every path in it is a literal
+# or assigned above, so it cannot expand to an empty path and no exit path leaves
+# output behind.
 trap 'undo; rm -f "${LOG:-}" "${BEFORE:-}" "${AFTER:-}"' EXIT HUP INT TERM
 
 ( cd "$RUN" && find . \( -type f -o -type l \) 2>/dev/null | LC_ALL=C sort ) >"$BEFORE"
 rm -rf "$ROOT$GD"
 mkdir -p "$ROOT$GD"
 
-# The log lives outside the image: inside, it would be a captured file, and a
-# relative path would land in the build container's working directory, which is not
-# the root being judged.
+# The log lives outside the image: inside it would be a captured file, and a relative
+# path would land in the build container's working directory.
 "$CHROOT" "$ROOT" "$GEN" "$GD" "$GD" "$GD" >"$LOG" 2>&1 && gen_rc=0 || gen_rc=$?
 [ "$gen_rc" = 0 ] ||
    fail "the generator exited $gen_rc against this image's /etc/netplan - the config does not parse, so at boot no daemon would configure anything"
@@ -136,12 +121,11 @@ mkdir -p "$ROOT$GD"
 # Exit status is the weak signal; a silent log is the strong one. netplan discards a
 # file it cannot parse ('Skipping YAML file due to parsing errors') and discards a
 # single netdef with an unknown key or a wrong type ('Skipping definition due to
-# parsing errors'), each time as a warning on stderr, and exits 0 with the rest of the
-# configuration written. A site file with one bad indent, or one key spelled wrong,
-# therefore leaves the wired port working and does nothing itself - at build time and at boot,
-# where the trace is a journal warning. Requiring silence is what makes those build
-# failures. It also covers 'Permissions for ... are too open', netplan's way of saying
-# a file that could hold a Wi-Fi passphrase or a WireGuard private key is world-readable.
+# parsing errors'), each as a warning on stderr, and exits 0 with the rest written. So
+# one bad indent or one misspelled key in a site file does nothing itself - at build
+# time or at boot, where the trace is a journal warning - and requiring silence is
+# what makes those build failures. It also covers 'Permissions for ... are too open',
+# netplan's way of saying a file that could hold a Wi-Fi passphrase is world-readable.
 if [ -s "$LOG" ]; then
    sed 's/^/openmux-network: netplan: /' "$LOG" >&2
    fail "the netplan generator complained about this image's /etc/netplan (lines above). It exits 0 anyway, having dropped whatever it complained about, so the file it dropped would simply be absent at boot"
@@ -151,7 +135,10 @@ r="$RUN"
 net="$r/systemd/network/10-netplan-$IFACE.network"
 
 # 1. The renderer produced its own artifact for the wired port, and asked for an
-# address.
+# address - in the form networkd reads: the file matches $IFACE by name, requests
+# rather than assigns an address, and does not turn DNS off. The last is the quiet
+# one: with UseDNS=false networkd still gets an address and still never tells resolved
+# the nameservers, so the device is "up" and resolves nothing.
 [ -f "$net" ] || {
    got=$(find "$r/systemd/network" -name '*.network' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
    fail "netplan wrote no systemd-networkd config for $IFACE (it wrote: ${got:-nothing}) - renderer: networkd did not take, so $IFACE belongs to another daemon or to none"
@@ -169,25 +156,23 @@ if grep -Eq '^[[:space:]]*UseDNS=false' "$net"; then
    fail "the generated config for $IFACE sets UseDNS=false: resolved would never learn the nameservers, and DNS would fail on a link that looks connected"
 fi
 
-# 2. The daemon gets started for it. This is the part that exists only in the
-# generator's output: netplan enables systemd-networkd per boot, from the renderer
-# key, and no state in the image says so. Symlink test, never -e: the target is
-# relative (../systemd-networkd.service) and is meant to resolve through systemd's
-# generator search path at boot, not against this build host.
+# 2. The daemon gets started for it - the part that exists only in the generator's
+# output: netplan enables systemd-networkd per boot from the renderer key, and no
+# state in the image says so. Symlink test, never -e: the target is relative
+# (../systemd-networkd.service) and resolves through systemd's generator search path
+# at boot, not against this build host.
 en="$ROOT$GD/multi-user.target.wants/systemd-networkd.service"
 [ -L "$en" ] ||
    fail "netplan enabled neither systemd-networkd nor an alternative for $IFACE: no wants entry was generated, so nothing would start a daemon to apply $(basename "$net")"
 
 # 3. The netdef key reached the generator's udev rules. For a networkd netdef netplan
 # emits `ENV{ID_NET_NAME}=="<netdef>", ENV{NM_UNMANAGED}="1"`, and on this image that
-# rule matches nothing: systemd-udevd exports ID_NET_NAME from one place, the
-# net_setup_link builtin, and only for an interface some .link file claims, while this
-# image masks 99-default.link to /dev/null (cleanup10 keeps the mask; a board reports
-# it as `Link File: n/a` in `networkctl status`). Step 4 therefore denies the port to
-# NetworkManager in NetworkManager's own terms. This step still proves something on its
-# own, and it is about the KEY: the key selected something, so every name derived from
-# it - the .network asserted above, this rule, wait-online's `-i <name>` drop-in, the
-# deny list written next - is the port on the board and not one the YAML invented.
+# rule matches nothing: systemd-udevd exports ID_NET_NAME only for an interface a
+# .link file claims, and this image masks the default one (step 4 denies the port in
+# NetworkManager's own terms instead). The assertion is still worth its place because
+# it is about the KEY: the key selected something, so every name derived from it - the
+# .network above, this rule, wait-online's `-i <name>` drop-in, the deny list written
+# next - is the port on the board and not one the YAML invented.
 rules="$r/udev/rules.d/90-netplan.rules"
 # Collected before the verdict, not inside it: a command substitution in the
 # message would need quotes nested three deep, and grep exits 1 on no match, which
@@ -199,24 +184,28 @@ if [ -e "$r/NetworkManager/system-connections/netplan-$IFACE.nmconnection" ]; th
    fail "netplan produced a NetworkManager profile for $IFACE as well as networkd's config - $IFACE would be configured twice"
 fi
 
-# 4. NetworkManager is told to keep off those ports by NetworkManager, and the list is
-# built from the .network files above rather than from the YAML, which is the whole
+# 4. NetworkManager is told to keep off those ports, in its own terms, and the list is
+# built from the .network files above rather than from the YAML - which is the whole
 # correctness argument: it names exactly the interfaces netplan renders with networkd.
-# The udev rule just asserted cannot do this here, because the property it matches is
-# never exported, and an interface left managed is not a harmless omission: for a
-# managed ethernet device with no profile of its own NetworkManager creates its default
-# wired profile, activates it, and the port ends up with whatever that profile
-# produced - after a failed address attempt, no IPv4 at all - while /etc/netplan
-# continues to read correctly and netplan's own output says networkd owns the port.
+# The udev rule just asserted cannot do this job here, because the property it matches
+# is never exported, and a managed port is not a harmless omission: for a managed
+# ethernet device with no profile of its own NetworkManager creates its default wired
+# profile and activates it, so the port ends up with whatever that produced - after a
+# failed address attempt, no IPv4 at all - while /etc/netplan still reads correctly.
+#
+# This is not insurance against a daemon that never runs. cleanup10 leaves
+# NetworkManager installed and unmasked, and `systemctl enable --now NetworkManager`
+# is the documented way to add a Wi-Fi card; the first thing a started NetworkManager
+# does is take every ethernet device not denied to it. The file is what makes that
+# command safe to type.
 #
 # unmanaged-devices is read at startup, no udev in the path, and an interface it names
-# is strictly unmanaged: `nmcli device set <if> managed yes` does not overrule it.
-# Per interface and never `*`, because a netdef naming the NetworkManager renderer -
-# how a wlan0 or a modem entry is written - produces a .nmconnection instead of a
-# .network and must stay manageable. Deriving the list from the generator instead of
-# restating it is what keeps a stale entry out of an image: a site file that moves a
-# port to the other renderer changes the generator's output, and this list follows it
-# in the same build.
+# is strictly unmanaged: `nmcli device set <if> managed yes` does not overrule it. Per
+# interface and never `*`, because a netdef naming the NetworkManager renderer - how a
+# wlan0 or modem entry is written - produces a .nmconnection instead of a .network and
+# has to stay manageable. Deriving the list here is what keeps stale entries out: a
+# site file that moves a port changes the generator's output and this list follows in
+# one build.
 specs=''
 for f in "$r"/systemd/network/10-netplan-*.network; do
    [ -e "$f" ] || continue   # an unmatched glob stays the literal pattern in /bin/sh
@@ -229,12 +218,11 @@ done
 [ -n "$specs" ] ||
    fail "no systemd-networkd config was generated for any interface, so nothing could be denied to NetworkManager - an empty unmanaged-devices is not a deny list"
 
-# conf.d rather than the conffile, for the reason 10-openmux.conf gives: editing
+# conf.d rather than the conffile, as 10-openmux.conf says: editing
 # /etc/NetworkManager/NetworkManager.conf turns every network-manager update into a
 # conffile prompt in a non-interactive image. NM merges conf.d in filename order and
-# only same-key files interact, and this file shares no key with 10-openmux.conf or
-# iwd.conf. [keyfile] because outside that group the key is read as nothing, which is
-# the same as not writing the file.
+# only same-key files interact; this file shares no key with 10-openmux.conf or
+# iwd.conf. [keyfile] because outside that group the key is read as nothing.
 nmdeny="$ROOT/etc/NetworkManager/conf.d/20-openmux-networkd.conf"
 install -d -m 0755 "${nmdeny%/*}"
 {
